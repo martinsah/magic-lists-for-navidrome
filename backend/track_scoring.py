@@ -259,3 +259,61 @@ def filter_tracks_for_this_is_playlist(
     }
     
     return filtered_tracks, filter_metadata
+
+
+def _genre_mix_llm_track_cap(target_playlist_size: int, source_count: int) -> int:
+    """Max tracks to send to the LLM for genre mix (keeps prompts within API limits)."""
+    if target_playlist_size > 50:
+        scaled = target_playlist_size * 2
+        hard_cap = 120
+    else:
+        scaled = target_playlist_size * 3
+        hard_cap = 120
+    # Never send fewer candidates than the requested playlist length
+    cap = max(target_playlist_size, max(60, min(hard_cap, scaled)))
+    return min(source_count, cap)
+
+
+def filter_tracks_for_genre_mix(
+    source_tracks: List[Dict],
+    target_playlist_size: int,
+    library_stats: Dict
+) -> Tuple[List[Dict], Dict[str, Any]]:
+    """
+    Filter genre tracks for LLM curation.
+
+    Unlike artist playlists, genre collections often have hundreds of tracks but
+    still fall below the This Is threshold multiplier — so we always cap payload size.
+    """
+    max_llm_tracks = _genre_mix_llm_track_cap(target_playlist_size, len(source_tracks))
+
+    if len(source_tracks) <= max_llm_tracks:
+        return source_tracks, {
+            'filtered': False,
+            'reason': 'below_cap',
+            'source_count': len(source_tracks),
+            'sent_count': len(source_tracks),
+            'max_llm_tracks': max_llm_tracks,
+        }
+
+    scored_tracks = score_tracks_by_user_engagement(source_tracks, library_stats)
+    filtered_tracks = [track for score, track in scored_tracks[:max_llm_tracks]]
+
+    print(f"🎯 GENRE MIX FILTERING:")
+    print(f"   🎯 LLM cap: {max_llm_tracks} tracks (target playlist: {target_playlist_size})")
+    print(f"   ✂️  Filtered {len(source_tracks)} → {len(filtered_tracks)} tracks for LLM payload")
+    print(f"   📤 Payload reduction: {((len(source_tracks) - len(filtered_tracks)) / len(source_tracks) * 100):.1f}%")
+
+    filter_metadata = {
+        'filtered': True,
+        'source_count': len(source_tracks),
+        'sent_count': len(filtered_tracks),
+        'max_llm_tracks': max_llm_tracks,
+        'score_range': {
+            'highest': scored_tracks[0][0] if scored_tracks else 0,
+            'lowest': scored_tracks[max_llm_tracks - 1][0] if len(scored_tracks) >= max_llm_tracks else 0,
+            'cutoff': scored_tracks[max_llm_tracks][0] if len(scored_tracks) > max_llm_tracks else 0,
+        },
+    }
+
+    return filtered_tracks, filter_metadata

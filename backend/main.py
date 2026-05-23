@@ -48,10 +48,47 @@ from .database import DatabaseManager, get_db
 from .schemas import CreatePlaylistRequest, CreateGenrePlaylistRequest, Playlist, RediscoverWeeklyResponse, RediscoverWeeklyV2Response, CreateRediscoverPlaylistRequest, PlaylistWithScheduleInfo
 from .recipe_manager import recipe_manager
 from .rediscover import RediscoverWeekly, ReDiscoverV2Processor
-from .track_scoring import filter_tracks_for_this_is_playlist
+from .track_scoring import filter_tracks_for_this_is_playlist, filter_tracks_for_genre_mix
+from .suggestion_service import (
+    process_playlist_suggestions,
+    unpack_curation_result,
+    missing_recommendations_enabled,
+)
 # SYSTEM CHECK FEATURE - START
 from .services.health_check_service import HealthCheckService
 # SYSTEM CHECK FEATURE - END
+
+
+async def _apply_missing_recommendations(
+    nav_client: NavidromeClient,
+    db: DatabaseManager,
+    playlist_db_id: int,
+    navidrome_playlist_id: str,
+    suggested_tracks: list,
+    curated_track_ids: list,
+    track_id_to_title: dict,
+    library_ids: Optional[List[str]] = None,
+) -> tuple:
+    """Post-create pass: append library matches, persist missing suggestions."""
+    if not missing_recommendations_enabled() or not suggested_tracks:
+        song_titles = [track_id_to_title.get(tid, "Unknown") for tid in curated_track_ids]
+        return song_titles, [], 0
+
+    _, added_count, song_titles = await process_playlist_suggestions(
+        nav_client=nav_client,
+        db=db,
+        playlist_db_id=playlist_db_id,
+        navidrome_playlist_id=navidrome_playlist_id,
+        suggested_tracks=suggested_tracks,
+        existing_track_ids=curated_track_ids,
+        track_id_to_title=track_id_to_title,
+        library_ids=library_ids,
+    )
+    playlists = await db.get_all_playlists_with_schedule_info()
+    row = next((p for p in playlists if p.get("id") == playlist_db_id), None)
+    missing = row.get("recommended_missing", []) if row else []
+    return song_titles, missing, added_count
+
 
 app = FastAPI(title="MagicLists Navidrome MVP")
 
@@ -166,13 +203,13 @@ async def read_root(request: Request):
         return RedirectResponse(url="/system-check", status_code=302)
     # SYSTEM CHECK FEATURE - END
     
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse(request=request, name="index.html")
 
 # SYSTEM CHECK FEATURE - START
 @app.get("/system-check", response_class=HTMLResponse)
 async def system_check_page(request: Request):
     """Serve the system check page"""
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse(request=request, name="index.html")
 # SYSTEM CHECK FEATURE - END
 
 @app.get("/api/artists")
@@ -193,11 +230,16 @@ async def get_artists(library_id: List[str] = Query(None)):
             raise HTTPException(status_code=500, detail=f"Failed to fetch artists: {error_msg}")
 
 @app.get("/api/genres")
-async def get_genres(library_id: List[str] = Query(None)):
-    """Get list of genres from Navidrome"""
+async def get_genres(
+    library_id: List[str] = Query(None),
+    min_song_count: int = Query(0, ge=0),
+):
+    """Get list of genres from Navidrome, optionally filtered by minimum track count."""
     try:
         client = get_navidrome_client()
         genres = await client.get_genres(library_id)
+        if min_song_count > 0:
+            genres = [g for g in genres if g.get("songCount", 0) >= min_song_count]
         return genres
     except Exception as e:
         error_msg = str(e)
@@ -330,12 +372,7 @@ async def create_playlist(
             include_reasoning=True
         )
         
-        # Handle both old and new return formats
-        if isinstance(curation_result, tuple):
-            curated_track_ids, reasoning = curation_result
-        else:
-            curated_track_ids = curation_result
-            reasoning = ""
+        curated_track_ids, reasoning, suggested_tracks = unpack_curation_result(curation_result)
 
         # Check for validation failures or empty results
         if not curated_track_ids:
@@ -366,15 +403,9 @@ async def create_playlist(
             comment=comment_to_use
         )
         
-        # Get track titles for database storage - PRESERVE AI CURATION ORDER
-        # Note: Use all_tracks for mapping since AI might reference tracks from full set
-        track_titles = []
         track_id_to_title = {track["id"]: track["title"] for track in all_tracks}
-        for track_id in curated_track_ids:  # Iterate in AI-curated order
-            if track_id in track_id_to_title:
-                track_titles.append(track_id_to_title[track_id])
-        
-        
+        track_titles = [track_id_to_title.get(track_id, "Unknown") for track_id in curated_track_ids]
+
         # Store playlist in local database (using the first artist_id for now)
         playlist = await db.create_playlist(
             artist_id=request.artist_ids[0],
@@ -385,6 +416,22 @@ async def create_playlist(
             playlist_length=request.playlist_length,
             library_ids=request.library_ids
         )
+
+        recommended_missing = []
+        added_from_suggestions = 0
+        if playlist and suggested_tracks:
+            track_titles, recommended_missing, added_from_suggestions = await _apply_missing_recommendations(
+                nav_client,
+                db,
+                playlist.id,
+                navidrome_playlist_id,
+                suggested_tracks,
+                curated_track_ids,
+                track_id_to_title,
+                request.library_ids,
+            )
+            if added_from_suggestions:
+                await db.update_playlist_songs(playlist.id, track_titles)
         
         # Handle scheduling if not "none" or "never"
         if request.refresh_frequency not in ["none", "never"]:
@@ -406,6 +453,10 @@ async def create_playlist(
         playlist_dict = playlist.dict() if hasattr(playlist, 'dict') else playlist.__dict__
         playlist_dict["navidrome_playlist_id"] = navidrome_playlist_id
         playlist_dict["refresh_frequency"] = request.refresh_frequency
+        playlist_dict["recommended_missing"] = recommended_missing
+        playlist_dict["added_from_suggestions"] = added_from_suggestions
+        if added_from_suggestions:
+            playlist_dict["songs"] = track_titles
         
         if request.refresh_frequency != "none":
             playlist_dict["next_refresh"] = calculate_next_refresh(request.refresh_frequency).isoformat()
@@ -515,7 +566,7 @@ async def create_genre_playlist(
         # NEW: Apply smart filtering for "Genre Mix" playlists to optimize LLM payload
         library_stats = await nav_client.get_library_stats()
 
-        filtered_tracks, filter_metadata = filter_tracks_for_this_is_playlist(
+        filtered_tracks, filter_metadata = filter_tracks_for_genre_mix(
             source_tracks=all_tracks,
             target_playlist_size=request.playlist_length,
             library_stats=library_stats
@@ -523,10 +574,10 @@ async def create_genre_playlist(
 
         # Log filtering results for analytics/debugging
         if filter_metadata['filtered']:
-            scheduler_logger.info(f"🎯 Smart filtering applied: {filter_metadata['source_count']} → {filter_metadata['sent_count']} tracks (multiplier: {filter_metadata['threshold_multiplier']}x)")
+            scheduler_logger.info(f"🎯 Genre mix filtering applied: {filter_metadata['source_count']} → {filter_metadata['sent_count']} tracks (LLM cap: {filter_metadata['max_llm_tracks']})")
             scheduler_logger.info(f"📊 Score range: {filter_metadata['score_range']['highest']:.1f} - {filter_metadata['score_range']['lowest']:.1f} (cutoff: {filter_metadata['score_range']['cutoff']:.1f})")
         else:
-            scheduler_logger.info(f"✅ No filtering needed: {filter_metadata['source_count']} tracks below threshold")
+            scheduler_logger.info(f"✅ No genre mix filtering needed: {filter_metadata['source_count']} tracks within LLM cap")
 
         # Use filtered tracks for LLM processing
         tracks_for_llm = filtered_tracks
@@ -539,12 +590,7 @@ async def create_genre_playlist(
             include_reasoning=True
         )
 
-        # Handle both old and new return formats
-        if isinstance(curation_result, tuple):
-            curated_track_ids, reasoning = curation_result
-        else:
-            curated_track_ids = curation_result
-            reasoning = ""
+        curated_track_ids, reasoning, suggested_tracks = unpack_curation_result(curation_result)
 
         # Check for validation failures or empty results
         if not curated_track_ids:
@@ -575,13 +621,8 @@ async def create_genre_playlist(
             comment=comment_to_use
         )
 
-        # Get track titles for database storage
-        track_titles = []
         track_id_to_title = {track["id"]: track["title"] for track in all_tracks}
-        for track_id in curated_track_ids:  # Iterate in AI-curated order
-            if track_id in track_id_to_title:
-                track_titles.append(track_id_to_title[track_id])
-
+        track_titles = [track_id_to_title.get(track_id, "Unknown") for track_id in curated_track_ids]
 
         # Store playlist in local database (using genre as identifier)
         playlist = await db.create_playlist(
@@ -593,6 +634,22 @@ async def create_genre_playlist(
             playlist_length=request.playlist_length,
             library_ids=request.library_ids
         )
+
+        recommended_missing = []
+        added_from_suggestions = 0
+        if playlist and suggested_tracks:
+            track_titles, recommended_missing, added_from_suggestions = await _apply_missing_recommendations(
+                nav_client,
+                db,
+                playlist.id,
+                navidrome_playlist_id,
+                suggested_tracks,
+                curated_track_ids,
+                track_id_to_title,
+                request.library_ids,
+            )
+            if added_from_suggestions:
+                await db.update_playlist_songs(playlist.id, track_titles)
 
         # Handle scheduling if not "none" or "never"
         if request.refresh_frequency not in ["none", "never"]:
@@ -606,6 +663,13 @@ async def create_genre_playlist(
                 next_refresh=next_refresh
             )
 
+        if playlist:
+            playlist_dict = playlist.dict() if hasattr(playlist, "dict") else playlist.__dict__
+            playlist_dict["recommended_missing"] = recommended_missing
+            playlist_dict["added_from_suggestions"] = added_from_suggestions
+            if added_from_suggestions:
+                playlist_dict["songs"] = track_titles
+            return playlist_dict
         return playlist
 
     except HTTPException:
@@ -778,6 +842,24 @@ async def create_rediscover_playlist_v2(
         )
         scheduler_logger.info(f"💾 Database playlist created: {playlist_record}")
 
+        suggested_tracks = playlist_data.get("suggested_tracks", [])
+        recommended_missing = []
+        added_from_suggestions = 0
+        if playlist_record and suggested_tracks:
+            track_id_to_title = {track["id"]: track.get("title", "Unknown") for track in tracks}
+            track_titles, recommended_missing, added_from_suggestions = await _apply_missing_recommendations(
+                nav_client,
+                db,
+                playlist_record.id,
+                navidrome_playlist_id,
+                suggested_tracks,
+                track_ids,
+                track_id_to_title,
+                request.library_ids,
+            )
+            if added_from_suggestions:
+                await db.update_playlist_songs(playlist_record.id, track_titles)
+
         # Set up scheduling if requested
         if request.refresh_frequency != "never":
             scheduler_logger.info(f"⏰ Setting up {request.refresh_frequency} refresh schedule")
@@ -794,10 +876,12 @@ async def create_rediscover_playlist_v2(
         return {
             "message": f"Re-Discover Weekly v2.0 playlist created successfully with {len(tracks)} tracks",
             "playlist_id": navidrome_playlist_id,
-            "track_count": len(tracks),
+            "track_count": len(track_titles) if added_from_suggestions else len(tracks),
             "theme": playlist_data.get("theme", "Mixed"),
             "mode": playlist_data.get("mode", "Unknown"),
-            "is_fallback": playlist_data.get("is_fallback", False)
+            "is_fallback": playlist_data.get("is_fallback", False),
+            "recommended_missing": recommended_missing,
+            "added_from_suggestions": added_from_suggestions,
         }
 
     except HTTPException:
@@ -1451,7 +1535,7 @@ async def spa_router(request: Request, path: str):
         if not system_check_passed:
             from fastapi.responses import RedirectResponse
             return RedirectResponse(url="/system-check", status_code=302)
-        return templates.TemplateResponse("index.html", {"request": request})
+        return templates.TemplateResponse(request=request, name="index.html")
     
     # Unknown paths - redirect to home
     from fastapi.responses import RedirectResponse

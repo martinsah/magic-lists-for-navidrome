@@ -329,6 +329,15 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
     
+    // Reload genre list when minimum-track filter changes
+    document.querySelectorAll('input[name="genre-min-song-count"]').forEach(radio => {
+        radio.addEventListener('change', () => {
+            if (selectedLibraryIds.length > 0) {
+                loadGenres();
+            }
+        });
+    });
+
     // Load libraries on page load
     loadLibraries();
 
@@ -396,13 +405,20 @@ async function loadArtists() {
     }
 }
 
+function getGenreMinSongCount() {
+    const selected = document.querySelector('input[name="genre-min-song-count"]:checked');
+    return selected ? parseInt(selected.value, 10) : 25;
+}
+
 async function loadGenres() {
     try {
-        let url = '/api/genres';
+        const params = [`min_song_count=${getGenreMinSongCount()}`];
         if (selectedLibraryIds.length > 0) {
-            const libraryIdsParam = selectedLibraryIds.map(id => `library_id=${encodeURIComponent(id)}`).join('&');
-            url = `/api/genres?${libraryIdsParam}`;
+            selectedLibraryIds.forEach(id => {
+                params.push(`library_id=${encodeURIComponent(id)}`);
+            });
         }
+        const url = `/api/genres?${params.join('&')}`;
         const response = await fetch(url);
         if (!response.ok) {
             throw new Error('Failed to fetch genres');
@@ -437,9 +453,15 @@ async function loadGenres() {
 
         // Clear any previous selection
         selectedGenre = null;
+        const submitBtn = document.getElementById('create-genre-playlist-btn');
+        if (submitBtn) {
+            submitBtn.disabled = true;
+        }
 
         // Populate the select dropdown
         if (genreSelect) {
+            genreSelect.value = '';
+
             // Clear existing options except the first one
             while (genreSelect.options.length > 1) {
                 genreSelect.remove(1);
@@ -453,8 +475,10 @@ async function loadGenres() {
                 genreSelect.appendChild(option);
             });
 
-            // Setup genre selection change handler
-            genreSelect.addEventListener('change', handleGenreSelection);
+            if (!genreSelect.dataset.changeListenerAttached) {
+                genreSelect.addEventListener('change', handleGenreSelection);
+                genreSelect.dataset.changeListenerAttached = 'true';
+            }
 
             // Reinitialize the HSSelect component
             if (window.HSSelect) {
@@ -1039,6 +1063,8 @@ async function loadPlaylists() {
     const loadingDiv = document.getElementById('playlists-loading');
     const containerDiv = document.getElementById('playlists-container');
 
+    setupPlaylistDeleteHandler();
+
     loadingDiv.classList.remove('hidden');
     containerDiv.innerHTML = '';
 
@@ -1093,17 +1119,85 @@ function truncateText(text, maxLength) {
     return text.length > maxLength ? text.substring(0, maxLength) + '...' : text;
 }
 
+function escapeHtml(text) {
+    if (!text) return '';
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+function escapeAttr(text) {
+    if (!text) return '';
+    return String(text)
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+}
+
+function setupPlaylistDeleteHandler() {
+    const container = document.getElementById('playlists-container');
+    if (!container || container.dataset.deleteHandlerAttached === 'true') {
+        return;
+    }
+    container.dataset.deleteHandlerAttached = 'true';
+    container.addEventListener('click', (event) => {
+        const button = event.target.closest('[data-action="delete-playlist"]');
+        if (!button) {
+            return;
+        }
+        event.preventDefault();
+        const playlistId = Number(button.dataset.playlistId);
+        const playlistName = button.dataset.playlistName || '';
+        deletePlaylist(playlistId, playlistName);
+    });
+}
+
+function renderMissingSuggestions(playlist) {
+    const missing = playlist.recommended_missing || [];
+    if (!missing.length) return '';
+
+    const items = missing.map((track, index) => {
+        const album = track.album ? ` — <span class="text-gray-500">${escapeHtml(track.album)}</span>` : '';
+        const note = track.note ? `<p class="text-xs text-gray-500 mt-0.5 mb-0">${escapeHtml(track.note)}</p>` : '';
+        return `<li class="text-sm text-gray-700"><span class="font-medium">${escapeHtml(track.title)}</span> by ${escapeHtml(track.artist)}${album}${note}</li>`;
+    }).join('');
+
+    const collapseId = `missing-${playlist.id}`;
+    return `
+        <details class="mt-3 border border-amber-200 rounded-lg bg-amber-50/50">
+            <summary class="cursor-pointer text-sm font-medium text-amber-900 px-3 py-2">
+                Recommended but not in library (${missing.length})
+            </summary>
+            <ul class="px-3 pb-3 space-y-2 list-disc list-inside" id="${collapseId}">
+                ${items}
+            </ul>
+        </details>
+    `;
+}
+
 function renderPlaylists(playlists) {
     const container = document.getElementById('playlists-container');
+    const hasMissingFeature = playlists.some(
+        p => (p.recommended_missing && p.recommended_missing.length) || (p.added_from_suggestions > 0)
+    );
+    const noteEl = document.getElementById('missing-recommendations-note');
+    if (noteEl) {
+        noteEl.classList.toggle('hidden', !hasMissingFeature);
+    }
     
     container.innerHTML = playlists.map(playlist => {
+        const addedBadge = playlist.added_from_suggestions > 0
+            ? `<span class="inline-block text-xs font-medium text-green-800 bg-green-100 rounded px-2 py-0.5 ml-1">+${playlist.added_from_suggestions} from suggestions</span>`
+            : '';
         return `
             <div class="flex items-start justify-between p-4 border border-gray-200 rounded-lg mb-4">
                 <div class="flex-grow">
-                    <h3 class="text-lg font-semibold text-gray-900 mb-1">${playlist.playlist_name}</h3>
+                    <h3 class="text-lg font-semibold text-gray-900 mb-1">${escapeHtml(playlist.playlist_name)}</h3>
                     <div class="text-sm text-gray-600 mb-2 space-y-1">
                         <p class="mb-0">
-                            ${playlist.track_count || 0} tracks • 
+                            ${playlist.track_count || 0} tracks${addedBadge} • 
                             Refreshes ${playlist.refresh_frequency || 'manually'} • 
                             ${playlist.next_refresh ? `Next refresh ${formatNextRefresh(playlist.next_refresh)}` : 'No scheduled refresh'}
                         </p>
@@ -1112,11 +1206,15 @@ function renderPlaylists(playlists) {
                             ${playlist.last_refreshed ? `Refreshed ${formatFriendlyDate(playlist.last_refreshed)}` : 'Not refreshed yet'}
                         </p>
                     </div>
-                    ${playlist.reasoning ? `<p class="text-sm text-gray-600 m-0 mt-2 italic">${truncateText(playlist.reasoning, 140)}</p>` : ''}
+                    ${playlist.reasoning ? `<p class="text-sm text-gray-600 m-0 mt-2 italic">${escapeHtml(truncateText(playlist.reasoning, 140))}</p>` : ''}
+                    ${renderMissingSuggestions(playlist)}
                 </div>
                 <div class="flex-none">
                     <button
-                        onclick="deletePlaylist(${playlist.id}, '${playlist.playlist_name}')"
+                        type="button"
+                        data-action="delete-playlist"
+                        data-playlist-id="${playlist.id}"
+                        data-playlist-name="${escapeAttr(playlist.playlist_name)}"
                         class="text-sm font-medium underline cursor-pointer border-none bg-transparent text-red-600 hover:text-red-800 px-2 py-1"
                     >
                         Delete

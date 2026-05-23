@@ -4,6 +4,12 @@ import json
 from typing import List, Dict, Any, Union, Tuple, Optional
 from .recipe_manager import recipe_manager
 from .services.ai_providers import get_ai_provider
+from .curation_helpers import finish_curation
+from .suggestion_service import (
+    extract_suggested_tracks_from_partial_text,
+    missing_recommendations_enabled,
+    suggestion_prompt_suffix,
+)
 
 class AIClient:
     """Client for AI-powered track curation using configurable providers"""
@@ -154,7 +160,7 @@ class AIClient:
 
 Tracks: {json.dumps(indexed_tracks, separators=(',', ':'), ensure_ascii=False)}
 
-Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}"""
+Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}{suggestion_prompt_suffix()}"""
                 
                 payload = {
                     "model": model,
@@ -192,21 +198,26 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}"""
             
             
             # Use the provider to make the AI request
+            use_structured_json = missing_recommendations_enabled()
             if "llm_config" in final_recipe:
                 # New recipe format - use structured payload
                 content = await self.provider.generate(
                     system_prompt=model_instructions,
                     user_prompt=user_content,
                     max_tokens=max_tokens,
-                    temperature=temperature
+                    temperature=temperature,
+                    json_response=use_structured_json,
+                    include_suggestions=use_structured_json,
                 )
             else:
                 # Legacy recipe format
                 content = await self.provider.generate(
                     system_prompt="You are a professional music curator. Always respond with valid JSON containing track_ids array and reasoning string. No other text outside the JSON.",
-                    user_prompt=prompt,
+                    user_prompt=prompt + suggestion_prompt_suffix(),
                     max_tokens=max_tokens,
-                    temperature=temperature
+                    temperature=temperature,
+                    json_response=use_structured_json,
+                    include_suggestions=use_structured_json,
                 )
 
             # Log the full raw AI response for debugging
@@ -330,10 +341,9 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}"""
                     # Final selection (limit to requested count)
                     final_selection = mapped_track_ids[:num_tracks]
 
-                    if include_reasoning:
-                        return final_selection, reasoning
-                    else:
-                        return final_selection
+                    return finish_curation(
+                        final_selection, reasoning, response_data, include_reasoning
+                    )
 
                 # Handle simple array format (legacy)
                 elif isinstance(response_data, list) and all(isinstance(tid, str) for tid in response_data):
@@ -341,26 +351,20 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}"""
                     filtered_ids = [tid for tid in response_data if tid in valid_ids]
                     final_selection = filtered_ids[:num_tracks]
 
-                    # AI curation successful for Genre Mix (logging moved to scheduler_logger)
-
-                    if include_reasoning:
-                        return final_selection, ""  # No reasoning available
-                    else:
-                        return final_selection
+                    return finish_curation(final_selection, "", {}, include_reasoning)
                 else:
                     raise ValueError("Invalid response format: expected dict with track_ids or array of track IDs")
 
             except (json.JSONDecodeError, ValueError) as e:
                 print(f"Failed to parse AI response: {e}")
                 print(f"Response content: {content}")
-                # Fall back to simple selection
-                return self._fallback_rediscover_selection(candidate_tracks, num_tracks, include_reasoning)
+                return self._fallback_this_is_selection(tracks_json, num_tracks, include_reasoning)
                 
         except httpx.RequestError as e:
             print(f"🌐 Network error calling AI API: {e}")
             print(f"🔑 API Key present: {bool(self.api_key)}")
             print(f"🌐 Base URL: {self.base_url}")
-            return self._fallback_rediscover_selection(candidate_tracks, num_tracks, include_reasoning, f"Network error: {e}")
+            return self._fallback_this_is_selection(tracks_json, num_tracks, include_reasoning, f"Network error: {e}")
         except httpx.HTTPStatusError as e:
             response_text = e.response.text
             
@@ -379,18 +383,32 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}"""
                 else:
                     user_message = f"AI service error (HTTP {e.response.status_code}). Please try again."
                     
-                return self._fallback_rediscover_selection(candidate_tracks, num_tracks, include_reasoning, user_message)
+                return self._fallback_this_is_selection(tracks_json, num_tracks, include_reasoning, user_message)
             else:
                 # Normal error response, log as before
                 print(f"🚨 HTTP error from AI API: {e.response.status_code} - {response_text}")
                 print(f"🔑 API Key present: {bool(self.api_key)}")
                 print(f"🤖 Model: {self.model}")
-                return self._fallback_rediscover_selection(candidate_tracks, num_tracks, include_reasoning, f"HTTP {e.response.status_code}: {response_text}")
+                return self._fallback_this_is_selection(tracks_json, num_tracks, include_reasoning, f"HTTP {e.response.status_code}: {response_text}")
         except Exception as e:
-            print(f"💥 Unexpected error in Re-Discover Weekly AI curation: {e}")
+            print(f"💥 Unexpected error in This Is AI curation: {e}")
             import traceback
             print(f"📋 Traceback: {traceback.format_exc()}")
-            return self._fallback_rediscover_selection(candidate_tracks, num_tracks, include_reasoning, f"Unexpected error: {e}")
+            return self._fallback_this_is_selection(tracks_json, num_tracks, include_reasoning, f"Unexpected error: {e}")
+
+    def _fallback_this_is_selection(self, tracks_json: List[Dict[str, Any]], num_tracks: int, include_reasoning: bool = False, error_reason: str = "AI service was unavailable") -> Union[List[str], Tuple[List[str], str]]:
+        """Fallback selection for This Is playlists when AI is unavailable"""
+        sorted_tracks = sorted(
+            tracks_json,
+            key=lambda x: x.get("play_count", 0),
+            reverse=True
+        )
+        track_ids = [track["id"] for track in sorted_tracks[:num_tracks]]
+
+        if include_reasoning:
+            reasoning = f"Fallback curation: Selected top {len(track_ids)} tracks sorted by play count (highest first). {error_reason}"
+            return track_ids, reasoning
+        return track_ids
 
     async def curate_rediscover_weekly(
         self,
@@ -485,16 +503,19 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}"""
 
 Tracks: {json.dumps(indexed_tracks, separators=(',', ':'), ensure_ascii=False)}
 
-Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}"""
+Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}{suggestion_prompt_suffix()}"""
 
                 print(f"📤 Phase 2 AI Payload (first 500 chars): {user_content[:500]}...")
                 print(f"📤 Phase 2 AI Payload (structured_tracks count): {len(indexed_tracks)}")
 
+                use_structured_json = missing_recommendations_enabled()
                 content = await self.provider.generate(
                     system_prompt=model_instructions,
                     user_prompt=user_content,
                     max_tokens=max_tokens,
-                    temperature=temperature
+                    temperature=temperature,
+                    json_response=use_structured_json,
+                    include_suggestions=use_structured_json,
                 )
             else:
                 # Legacy recipe format fallback
@@ -505,11 +526,14 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}"""
                 temperature = llm_params.get("temperature", 0.8)
                 max_tokens = llm_params.get("max_tokens", 2500)
 
+                use_structured_json = missing_recommendations_enabled()
                 content = await self.provider.generate(
                     system_prompt="You are a professional music curator specializing in rediscovery playlists. Always respond with valid JSON containing track_ids array and reasoning string. No other text outside the JSON.",
-                    user_prompt=prompt,
+                    user_prompt=prompt + suggestion_prompt_suffix(),
                     max_tokens=max_tokens,
-                    temperature=temperature
+                    temperature=temperature,
+                    json_response=use_structured_json,
+                    include_suggestions=use_structured_json,
                 )
 
             # Parse the JSON response with comprehensive validation
@@ -604,10 +628,7 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}"""
 
                     print(f"✅ Phase 2 AI curation successful: returning {len(track_ids)} tracks with reasoning length {len(reasoning)}")
 
-                    if include_reasoning:
-                        return track_ids, reasoning
-                    else:
-                        return track_ids
+                    return finish_curation(track_ids, reasoning, result, include_reasoning)
 
                 else:
                     print(f"❌ Response validation failed: expected dict with 'track_ids' key, got: {type(result)}")
@@ -752,61 +773,56 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}"""
 
             # New recipe format (genre_mix recipe has llm_config)
             llm_config = final_recipe.get("llm_config", {})
-            model_instructions = final_recipe.get("model_instructions", "")
-
-            # Use model from environment (.env file), ignoring recipe model_name
-            model = self.model or "openai/gpt-3.5-turbo"
             temperature = llm_config.get("temperature", 0.7)
-            max_tokens = llm_config.get("max_output_tokens", 16000)
+            max_tokens = min(llm_config.get("max_output_tokens", 8192), 8192)
 
-            print(f"🤖 Using AI model: {model} (from {self.provider.provider_type} provider)")
+            print(f"🤖 Using AI model: {self.model} (from {self.provider.provider_type} provider)")
 
-            # Serialize the complete recipe (excluding tracks_data to avoid duplication)
-            recipe_without_tracks = {k: v for k, v in final_recipe.items() if k != "tracks_data"}
+            # Compact system prompt — full recipe text is huge and triggers timeouts/503s
+            max_per_album = max(2, (num_tracks + 4) // 5)
+            system_prompt = (
+                f"You are a professional music curator creating a '{genre}' Genre Mix playlist. "
+                f"Select exactly {num_tracks} tracks using the i field (index) from the candidate list. "
+                f"Prioritize variety: avoid back-to-back tracks from the same album. "
+                f"Prefer higher play_count and local_library_likes. "
+                f"Use at most {max_per_album} tracks per album. "
+                f"Return valid JSON with track_ids (integers) and a brief reasoning string."
+                f"{suggestion_prompt_suffix()}"
+            )
 
-            # Build structured JSON payload with INDEX-BASED approach
-            # Create indexed tracks (remove complex IDs, use simple indices)
             indexed_tracks = []
-
             for index, track in enumerate(shuffled_tracks):
-                # Store the actual track ID in our mapping
                 track_id_map.append(track["id"])
-
-                # Create indexed track (minimal essential data to reduce token usage)
-                indexed_track = {
-                    "index": index,
-                    "track_name": track.get("title", "Unknown"),
-                    "artist": track.get("artist", "Unknown"),
-                    "play_count": track.get("play_count", 0),
-                    "local_library_likes": track.get("local_library_likes", False)
-                }
-                indexed_tracks.append(indexed_track)
-
-            structured_payload = {
-                "recipe": recipe_without_tracks,
-                "available_tracks": indexed_tracks,  # INDEX-BASED tracks (no complex IDs)
-                "request": {
-                    "genre_name": genre,
-                    "desired_track_count": num_tracks,
-                    "playlist_type": "genre_mix"
-                }
-            }
+                indexed_tracks.append({
+                    "i": index,
+                    "t": track.get("title", "Unknown"),
+                    "a": track.get("artist", "Unknown"),
+                    "p": track.get("play_count", 0),
+                    "l": track.get("local_library_likes", False),
+                })
 
             print(f"🔢 Using index-based approach for {len(track_id_map)} tracks")
 
-            # Minimal payload for genre mix - only essential data
-            user_content = f"""Select {num_tracks} tracks for a {genre} playlist.
+            reasoning_hint = (
+                "Keep reasoning under 150 characters."
+                if num_tracks > 50
+                else "Keep reasoning concise."
+            )
+            user_content = (
+                f"genre_mix: Select exactly {num_tracks} tracks for '{genre}'. "
+                f"Candidates (i=index, t=title, a=artist, p=play_count, l=liked): "
+                f"{json.dumps(indexed_tracks, separators=(',', ':'), ensure_ascii=False)}. "
+                f"{reasoning_hint}"
+            )
 
-Tracks: {json.dumps(indexed_tracks, separators=(',', ':'), ensure_ascii=False)}
-
-Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}"""
-
-            # Use the provider to make the AI request
+            use_suggestions = missing_recommendations_enabled()
             content = await self.provider.generate(
-                system_prompt=model_instructions,
+                system_prompt=system_prompt,
                 user_prompt=user_content,
                 max_tokens=max_tokens,
-                temperature=temperature
+                temperature=temperature,
+                json_response=True,
+                include_suggestions=use_suggestions,
             )
 
             # Log the full raw AI response for debugging
@@ -932,10 +948,9 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}"""
                     # Final selection (limit to requested count)
                     final_selection = mapped_track_ids[:num_tracks]
 
-                    if include_reasoning:
-                        return final_selection, reasoning
-                    else:
-                        return final_selection
+                    return finish_curation(
+                        final_selection, reasoning, response_data, include_reasoning
+                    )
 
                 # Handle simple array format (legacy)
                 elif isinstance(response_data, list) and all(isinstance(tid, str) for tid in response_data):
@@ -943,19 +958,24 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}"""
                     filtered_ids = [tid for tid in response_data if tid in valid_ids]
                     final_selection = filtered_ids[:num_tracks]
 
-                    # AI curation successful for Genre Mix (logging moved to scheduler_logger)
-
-                    if include_reasoning:
-                        return final_selection, ""  # No reasoning available
-                    else:
-                        return final_selection
+                    return finish_curation(final_selection, "", {}, include_reasoning)
                 else:
                     raise ValueError("Invalid response format: expected dict with track_ids or array of track IDs")
 
             except (json.JSONDecodeError, ValueError) as e:
                 print(f"Failed to parse AI response: {e}")
-                print(f"Response content: {content}")
-                # Fall back to simple selection
+                print(f"Response content: {content[:500]}...")
+                recovered = self._recover_partial_genre_mix_response(content, track_id_map, num_tracks)
+                if recovered:
+                    final_selection, reasoning, suggested = recovered
+                    print(
+                        f"✅ Recovered {len(final_selection)} tracks from partial AI response"
+                        f" ({len(suggested)} suggestions)"
+                    )
+                    response_data = {"suggested_tracks": suggested} if suggested else {}
+                    return finish_curation(
+                        final_selection, reasoning, response_data, include_reasoning
+                    )
                 return self._fallback_genre_mix_selection(tracks_json, num_tracks, include_reasoning)
 
         except httpx.RequestError as e:
@@ -992,6 +1012,69 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}"""
             import traceback
             print(f"📋 Traceback: {traceback.format_exc()}")
             return self._fallback_genre_mix_selection(tracks_json, num_tracks, include_reasoning, f"Unexpected error: {e}")
+
+    def _recover_partial_genre_mix_response(
+        self,
+        content: str,
+        track_id_map: List[str],
+        num_tracks: int,
+    ) -> Optional[Tuple[List[str], str, List[Dict[str, Any]]]]:
+        """Extract track indices and partial suggestions from truncated JSON."""
+        import re
+
+        cleaned = content.strip()
+        if cleaned.startswith("```json"):
+            cleaned = cleaned[7:]
+        if cleaned.startswith("```"):
+            cleaned = cleaned[3:]
+        if cleaned.endswith("```"):
+            cleaned = cleaned[:-3]
+        cleaned = cleaned.strip()
+
+        indices: List[int] = []
+        match = re.search(r'"track_ids"\s*:\s*\[([^\]]*)', cleaned, re.DOTALL)
+        if match:
+            indices = [int(n) for n in re.findall(r"\d+", match.group(1))]
+        else:
+            array_match = re.search(r'\[([\d\s,]+)\]', cleaned)
+            if array_match:
+                indices = [int(n) for n in re.findall(r"\d+", array_match.group(1))]
+
+        # Truncated JSON (common with MAX_TOKENS): grab indices after track_ids key
+        if not indices:
+            key_pos = cleaned.find('"track_ids"')
+            if key_pos >= 0:
+                tail = cleaned[key_pos : key_pos + 4000]
+                indices = [int(n) for n in re.findall(r"\d+", tail)]
+
+        if not indices:
+            return None
+
+        valid_indices = [idx for idx in indices if 0 <= idx < len(track_id_map)]
+        if len(valid_indices) < max(1, int(num_tracks * 0.5)):
+            return None
+
+        mapped_ids = [track_id_map[idx] for idx in valid_indices]
+        seen = set()
+        unique_ids = []
+        for tid in mapped_ids:
+            if tid not in seen:
+                seen.add(tid)
+                unique_ids.append(tid)
+
+        if len(unique_ids) < num_tracks:
+            for tid in track_id_map:
+                if tid not in seen:
+                    unique_ids.append(tid)
+                    seen.add(tid)
+                if len(unique_ids) >= num_tracks:
+                    break
+
+        final_selection = unique_ids[:num_tracks]
+        reasoning_match = re.search(r'"reasoning"\s*:\s*"((?:[^"\\]|\\.)*)"', cleaned)
+        reasoning = reasoning_match.group(1) if reasoning_match else "Recovered from partial AI response."
+        suggested = extract_suggested_tracks_from_partial_text(cleaned)
+        return final_selection, reasoning, suggested
 
     def _fallback_genre_mix_selection(self, tracks_json: List[Dict[str, Any]], num_tracks: int, include_reasoning: bool = False, error_reason: str = "AI service was unavailable") -> Union[List[str], Tuple[List[str], str]]:
         """Fallback selection algorithm for genre mix when AI is unavailable"""

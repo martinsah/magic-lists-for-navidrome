@@ -64,6 +64,15 @@ class DatabaseManager:
                 # Column already exists or other error - ignore
                 pass
 
+            for column_sql in (
+                "ALTER TABLE playlists ADD COLUMN recommended_missing TEXT",
+                "ALTER TABLE playlists ADD COLUMN added_from_suggestions INTEGER DEFAULT 0",
+            ):
+                try:
+                    await db.execute(column_sql)
+                except Exception:
+                    pass
+
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS scheduled_playlists (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -263,6 +272,8 @@ class DatabaseManager:
                     p.updated_at,
                     p.last_refreshed,
                     p.playlist_length,
+                    p.recommended_missing,
+                    p.added_from_suggestions,
                     sp.refresh_frequency,
                     sp.next_refresh,
                     sp.playlist_type
@@ -277,16 +288,18 @@ class DatabaseManager:
                         "id": row[0],
                         "artist_id": row[1],
                         "playlist_name": row[2],
-                        "songs": json.loads(row[3]),
+                        "songs": json.loads(row[3]) if row[3] else [],
                         "reasoning": row[4],
                         "navidrome_playlist_id": row[5],
                         "created_at": row[6],
                         "updated_at": row[7],
                         "last_refreshed": row[8],
                         "playlist_length": row[9],
-                        "refresh_frequency": row[10],
-                        "next_refresh": row[11],
-                        "playlist_type": row[12]
+                        "recommended_missing": json.loads(row[10]) if row[10] else [],
+                        "added_from_suggestions": row[11] or 0,
+                        "refresh_frequency": row[12],
+                        "next_refresh": row[13],
+                        "playlist_type": row[14],
                     }
                     playlists.append(playlist_data)
         
@@ -370,6 +383,30 @@ class DatabaseManager:
                 WHERE id = ?
             """, (songs_json, playlist_id))
             
+            await db.commit()
+            return cursor.rowcount > 0
+
+    async def update_playlist_suggestions(
+        self,
+        playlist_id: int,
+        recommended_missing: List[Dict],
+        added_from_suggestions: int,
+    ) -> bool:
+        """Persist missing recommendations and appended suggestion count."""
+        await self.init_db()
+
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute("""
+                UPDATE playlists
+                SET recommended_missing = ?,
+                    added_from_suggestions = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            """, (
+                json.dumps(recommended_missing or []),
+                added_from_suggestions,
+                playlist_id,
+            ))
             await db.commit()
             return cursor.rowcount > 0
     

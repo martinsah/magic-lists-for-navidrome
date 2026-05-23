@@ -530,10 +530,12 @@ class ReDiscoverV2Processor:
             # Phase 2: Search & Sequence
             search_results = await self._execute_searches(theme_strategy, library_ids)
             candidates = self._filter_and_enrich_candidates(search_results, target_tracks)
-            final_tracks = await self._llm_phase2_sequencing(candidates, theme_strategy)
+            final_tracks, suggested_tracks = await self._llm_phase2_sequencing(candidates, theme_strategy)
 
             # Phase 3: Create & Log
-            playlist_data = await self._create_playlist_data(final_tracks, theme_strategy, user_id, server_id)
+            playlist_data = await self._create_playlist_data(
+                final_tracks, theme_strategy, user_id, server_id, suggested_tracks=suggested_tracks
+            )
             await self._log_to_database_v2(playlist_data, theme_strategy, len(target_tracks))
 
             return playlist_data
@@ -924,8 +926,11 @@ class ReDiscoverV2Processor:
         candidates.sort(key=lambda x: x["rediscovery_score"], reverse=True)
         return candidates[:100]  # Return top 100 for AI selection
 
-    async def _llm_phase2_sequencing(self, candidates: List[Dict[str, Any]], theme_strategy: Dict[str, Any]) -> List[Dict[str, Any]]:
+    async def _llm_phase2_sequencing(
+        self, candidates: List[Dict[str, Any]], theme_strategy: Dict[str, Any]
+    ) -> tuple:
         """Phase 2 AI: Sequence exactly 25 tracks for optimal playlist flow."""
+        suggested_tracks: List[Dict[str, Any]] = []
 
         # Prepare AI input
         ai_candidates = []
@@ -959,11 +964,9 @@ class ReDiscoverV2Processor:
                 variety_context=json.dumps(theme_strategy) if theme_strategy else None
             )
 
-            if isinstance(ai_result, tuple):
-                track_ids, reasoning = ai_result
-            else:
-                track_ids = ai_result
-                reasoning = ""
+            from .suggestion_service import unpack_curation_result
+
+            track_ids, reasoning, suggested_tracks = unpack_curation_result(ai_result)
 
             # Build final track list
             final_tracks = []
@@ -978,7 +981,7 @@ class ReDiscoverV2Processor:
                     })
 
             if len(final_tracks) == self.config["track_count"]:
-                return final_tracks
+                return final_tracks, suggested_tracks
 
         except Exception as e:
             print(f"❌ Phase 2 AI failed: {e}")
@@ -987,13 +990,21 @@ class ReDiscoverV2Processor:
 
         # Fallback: Score-based selection
         top_candidates = candidates[:self.config["track_count"]]
-        return [{
+        fallback_tracks = [{
             **track,
             "ai_curated": False,
             "ai_reasoning": "Algorithmic selection (AI not available)"
         } for track in top_candidates]
+        return fallback_tracks, []
 
-    async def _create_playlist_data(self, tracks: List[Dict[str, Any]], theme_strategy: Dict[str, Any], user_id: str, server_id: str) -> Dict[str, Any]:
+    async def _create_playlist_data(
+        self,
+        tracks: List[Dict[str, Any]],
+        theme_strategy: Dict[str, Any],
+        user_id: str,
+        server_id: str,
+        suggested_tracks: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
         """Create final playlist data structure."""
         return {
             "name": "Re-Discover Weekly",
@@ -1001,6 +1012,7 @@ class ReDiscoverV2Processor:
             "theme": theme_strategy.get("theme_identified", "Mixed"),
             "mode": theme_strategy.get("selected_mode", "A"),
             "reasoning": theme_strategy.get("reasoning", ""),
+            "suggested_tracks": suggested_tracks or [],
             "user_id": user_id,
             "server_id": server_id,
             "generated_at": datetime.now().isoformat()
@@ -1051,7 +1063,8 @@ class ReDiscoverV2Processor:
                         "user_id": user_id,
                         "server_id": server_id,
                         "generated_at": datetime.now().isoformat(),
-                        "is_fallback": True
+                        "is_fallback": True,
+                        "suggested_tracks": [],
                     }
 
         except Exception as e:
@@ -1081,7 +1094,8 @@ class ReDiscoverV2Processor:
                     "user_id": user_id,
                     "server_id": server_id,
                     "generated_at": datetime.now().isoformat(),
-                    "is_fallback": True
+                    "is_fallback": True,
+                    "suggested_tracks": [],
                 }
 
         except Exception as e:

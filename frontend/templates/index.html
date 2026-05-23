@@ -545,6 +545,29 @@
                      </div>
 
                      <form id="genre-mix-form" class="space-y-6">
+                         <!-- Genre size filter -->
+                         <div>
+                             <label class="block text-sm text-gray-900 font-bold mb-3">Minimum tracks per genre</label>
+                             <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+                                 <div class="flex items-center">
+                                     <input type="radio" id="genre-min-1" name="genre-min-song-count" value="1" class="shrink-0 mt-0.5 border-gray-200 rounded-full text-blue-600 focus:ring-blue-500">
+                                     <label for="genre-min-1" class="text-sm text-gray-500 ms-2">1 or more</label>
+                                 </div>
+                                 <div class="flex items-center">
+                                     <input type="radio" id="genre-min-25" name="genre-min-song-count" value="25" checked class="shrink-0 mt-0.5 border-gray-200 rounded-full text-blue-600 focus:ring-blue-500">
+                                     <label for="genre-min-25" class="text-sm text-gray-500 ms-2">25 or more</label>
+                                 </div>
+                                 <div class="flex items-center">
+                                     <input type="radio" id="genre-min-100" name="genre-min-song-count" value="100" class="shrink-0 mt-0.5 border-gray-200 rounded-full text-blue-600 focus:ring-blue-500">
+                                     <label for="genre-min-100" class="text-sm text-gray-500 ms-2">100 or more</label>
+                                 </div>
+                                 <div class="flex items-center">
+                                     <input type="radio" id="genre-min-250" name="genre-min-song-count" value="250" class="shrink-0 mt-0.5 border-gray-200 rounded-full text-blue-600 focus:ring-blue-500">
+                                     <label for="genre-min-250" class="text-sm text-gray-500 ms-2">250 or more</label>
+                                 </div>
+                             </div>
+                         </div>
+
                          <!-- Genre Selection -->
                          <div>
                              <label for="genre-select" class="block text-sm text-gray-900 font-bold mb-2">Choose a genre from your library</label>
@@ -632,6 +655,9 @@
                       <div class="mb-6">
                           <h1 class="text-2xl font-bold text-gray-900 mb-3">Manage Playlists</h1>
                           <p class="text-gray-600">View and manage all playlists you've created. These are synced with your Navidrome library.</p>
+                          <p id="missing-recommendations-note" class="hidden text-sm text-amber-700 mt-2">
+                              When enabled, AI may add extra tracks from your library that match suggestions. Playlists can be longer than the size you requested.
+                          </p>
                       </div>
 
                       <!-- Loading State -->
@@ -794,6 +820,6 @@
     <div id="toast-container" class="absolute top-2 right-2 w-full max-w-sm z-50 space-y-3 pointer-events-none">
         <!-- Toasts will be dynamically inserted here -->   
     </div>
-    <script src="/static/app.js?v=1.0.0"></script>
+    <script src="/static/app.js?v=1.0.1"></script>
 </body>
 </html>

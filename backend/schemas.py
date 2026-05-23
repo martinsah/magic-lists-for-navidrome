@@ -25,6 +25,14 @@ class CreateGenrePlaylistRequest(BaseModel):
     playlist_length: int = 25  # Number of tracks to include
     library_ids: List[str] = []  # List of library IDs to filter tracks
 
+class SuggestedMissingTrack(BaseModel):
+    """A track suggested by AI that is not in the library"""
+    title: str
+    artist: str
+    album: Optional[str] = None
+    note: Optional[str] = None
+
+
 class Playlist(BaseModel):
     """Schema for a stored playlist"""
     id: int
@@ -34,6 +42,8 @@ class Playlist(BaseModel):
     reasoning: Optional[str] = None
     navidrome_playlist_id: Optional[str] = None
     library_ids: List[str] = []
+    recommended_missing: List[SuggestedMissingTrack] = []
+    added_from_suggestions: int = 0
     created_at: str
     updated_at: str
 

@@ -1,5 +1,6 @@
 import httpx
 import os
+import re
 from typing import List, Dict, Any, Union, Optional
 
 class NavidromeClient:
@@ -816,6 +817,123 @@ class NavidromeClient:
             raise Exception(f"HTTP error from Navidrome: {e.response.status_code}")
         except Exception as e:
             raise Exception(f"Unexpected error fetching genre stats: {e}")
+
+    def _normalize_lookup_text(self, value: str) -> str:
+        return re.sub(r"\s+", " ", (value or "").lower().strip())
+
+    async def find_song_by_artist_title(
+        self,
+        artist: str,
+        title: str,
+        album: Optional[str] = None,
+        library_ids: Union[List[str], str, None] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Find a library song by artist and title using search3."""
+        try:
+            await self._ensure_authenticated()
+
+            library_id = None
+            if isinstance(library_ids, list) and library_ids:
+                library_id = library_ids[0]
+            elif isinstance(library_ids, str):
+                library_id = library_ids
+
+            params = self._get_subsonic_params()
+            params["query"] = f"{artist} {title}".strip()
+            params["artistCount"] = 0
+            params["albumCount"] = 0
+            params["songCount"] = 25
+
+            if library_id:
+                params["musicFolderId"] = library_id
+
+            response = await self.client.get(
+                f"{self.base_url}/rest/search3.view",
+                params=params,
+            )
+            response.raise_for_status()
+
+            data = response.json()
+            subsonic_response = data.get("subsonic-response", {})
+            if subsonic_response.get("status") != "ok":
+                return None
+
+            songs = subsonic_response.get("searchResult3", {}).get("song", [])
+            if isinstance(songs, dict):
+                songs = [songs]
+            if not songs:
+                return None
+
+            target_artist = self._normalize_lookup_text(artist)
+            target_title = self._normalize_lookup_text(title)
+            target_album = self._normalize_lookup_text(album) if album else None
+
+            best_match = None
+            best_score = -1
+
+            for song in songs:
+                song_artist = self._normalize_lookup_text(song.get("artist", ""))
+                song_title = self._normalize_lookup_text(song.get("title", ""))
+                song_album = self._normalize_lookup_text(song.get("album", ""))
+
+                if target_artist not in song_artist and song_artist not in target_artist:
+                    continue
+                if target_title != song_title and target_title not in song_title and song_title not in target_title:
+                    continue
+
+                score = 2
+                if target_title == song_title:
+                    score += 2
+                if target_artist == song_artist:
+                    score += 2
+                if target_album and target_album == song_album:
+                    score += 1
+
+                if score > best_score:
+                    best_score = score
+                    best_match = {
+                        "id": song.get("id"),
+                        "title": song.get("title", title),
+                        "artist": song.get("artist", artist),
+                        "album": song.get("album", ""),
+                    }
+
+            return best_match
+
+        except Exception as e:
+            print(f"⚠️ find_song_by_artist_title failed for {artist} - {title}: {e}")
+            return None
+
+    async def append_tracks_to_playlist(self, playlist_id: str, track_ids: List[str]) -> bool:
+        """Append tracks to an existing playlist without removing current entries."""
+        if not track_ids:
+            return True
+
+        try:
+            await self._ensure_authenticated()
+
+            update_params = self._get_subsonic_params()
+            update_params["playlistId"] = playlist_id
+            update_params["songIdToAdd"] = track_ids
+
+            response = await self.client.get(
+                f"{self.base_url}/rest/updatePlaylist.view",
+                params=update_params,
+            )
+            response.raise_for_status()
+
+            update_data = response.json()
+            update_subsonic = update_data.get("subsonic-response", {})
+            if update_subsonic.get("status") != "ok":
+                error = update_subsonic.get("error", {})
+                raise Exception(f"Failed to append songs to playlist: {error.get('message', 'Unknown error')}")
+
+            print(f"➕ Appended {len(track_ids)} suggested track(s) to playlist {playlist_id}")
+            return True
+
+        except Exception as e:
+            print(f"⚠️ append_tracks_to_playlist failed: {e}")
+            return False
 
     async def create_playlist(self, name: str, track_ids: List[str], comment: str = None) -> str:
         """Create a new playlist in Navidrome using Subsonic API
