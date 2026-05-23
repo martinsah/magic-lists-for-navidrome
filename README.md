@@ -26,7 +26,8 @@ This branch includes recent production-focused improvements:
 | Missing-track recommendations | Opt-in via `ENABLE_MISSING_RECOMMENDATIONS`; library matches append automatically |
 | Genre picker | Filter genres by minimum track count (1+, 25+, 100+, 250+) |
 | System check / UI | Startup health checks; template rendering compatible with current Starlette |
-| Docker | Build from source or extend an existing compose stack; credentials via environment variables only |
+| Docker | Build from source, use `ghcr.io/martinsah/magic-lists-for-navidrome`, or extend an existing compose stack |
+| Container images | Published to GitHub Container Registry on push to `main` and on `v*` tags |
 
 Playlist curation still selects exactly **N** tracks from your library for the main mix. Optional suggestions may add extra tracks when they already exist in Navidrome.
 
@@ -122,11 +123,13 @@ Access MagicLists at http://localhost:4545
 
 Use the Navidrome **service name** as the hostname in `NAVIDROME_URL` (for example `http://navidrome:4533`). If your service is named differently in compose, adjust accordingly.
 
-### Alternative: Pre-built image
+### Pre-built image (this fork, GitHub Container Registry)
+
+Images are built automatically on every push to `main` and on version tags (`v*`).
 
 ```yaml
   magiclists:
-    image: rickysynnot/magic-lists-for-navidrome:latest
+    image: ghcr.io/martinsah/magic-lists-for-navidrome:latest
     container_name: magiclists
     ports:
       - "4545:8000"
@@ -135,13 +138,35 @@ Use the Navidrome **service name** as the hostname in `NAVIDROME_URL` (for examp
       - NAVIDROME_USERNAME=${NAVIDROME_USERNAME}
       - NAVIDROME_PASSWORD=${NAVIDROME_PASSWORD}
       - DATABASE_PATH=/app/data/magiclists.db
-      - AI_PROVIDER=${AI_PROVIDER:-openrouter}
+      - AI_PROVIDER=${AI_PROVIDER:-google}
       - AI_API_KEY=${AI_API_KEY}
-      - AI_MODEL=${AI_MODEL:-meta-llama/llama-3.3-70b-instruct}
+      - AI_MODEL=${AI_MODEL:-gemini-2.5-flash}
+      - ENABLE_MISSING_RECOMMENDATIONS=${ENABLE_MISSING_RECOMMENDATIONS:-false}
+      - APPEND_LIBRARY_MATCHES=${APPEND_LIBRARY_MATCHES:-true}
+      - MAX_SUGGESTED_MISSING=${MAX_SUGGESTED_MISSING:-10}
     volumes:
       - ./magiclists-data:/app/data
     restart: unless-stopped
 ```
+
+Pull and run without building locally:
+
+```bash
+docker compose -f docker-compose.ghcr.yml pull
+docker compose -f docker-compose.ghcr.yml up -d
+```
+
+Pin a specific release instead of `latest`, for example:
+
+```yaml
+image: ghcr.io/martinsah/magic-lists-for-navidrome:v1.0.0
+```
+
+**First-time setup:** After the first workflow run, open [Packages](https://github.com/martinsah?tab=packages) on GitHub, select `magic-lists-for-navidrome`, and set **Package visibility** to **Public** so anonymous `docker pull` works.
+
+### Upstream pre-built image (original project)
+
+The original maintainer publishes `rickysynnot/magic-lists-for-navidrome:latest` on Docker Hub. That image does not include changes from this fork.
 
 ### Alternative: Standalone Docker container
 

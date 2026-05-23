@@ -1,0 +1,25 @@
+# Standalone compose using the pre-built image from GitHub Container Registry.
+# Copy Navidrome credentials and AI settings into .env or the environment block below.
+#
+#   docker compose -f docker-compose.ghcr.yml up -d
+
+services:
+  magiclists:
+    image: ghcr.io/martinsah/magic-lists-for-navidrome:latest
+    container_name: magiclists
+    ports:
+      - "4545:8000"
+    environment:
+      - NAVIDROME_URL=${NAVIDROME_URL:-http://navidrome:4533}
+      - NAVIDROME_USERNAME=${NAVIDROME_USERNAME}
+      - NAVIDROME_PASSWORD=${NAVIDROME_PASSWORD}
+      - DATABASE_PATH=/app/data/magiclists.db
+      - AI_PROVIDER=${AI_PROVIDER:-google}
+      - AI_API_KEY=${AI_API_KEY}
+      - AI_MODEL=${AI_MODEL:-gemini-2.5-flash}
+      - ENABLE_MISSING_RECOMMENDATIONS=${ENABLE_MISSING_RECOMMENDATIONS:-false}
+      - APPEND_LIBRARY_MATCHES=${APPEND_LIBRARY_MATCHES:-true}
+      - MAX_SUGGESTED_MISSING=${MAX_SUGGESTED_MISSING:-10}
+    volumes:
+      - ./magiclists-data:/app/data
+    restart: unless-stopped
