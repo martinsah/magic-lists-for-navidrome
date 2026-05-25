@@ -9,6 +9,10 @@ let currentToast = null;
 let selectedLibraryIds = [];
 let allLibraries = [];
 
+// Lidarr integration (loaded when viewing Manage Playlists)
+let lidarrStatus = { enabled: false, configured: false, reachable: false };
+let pendingLidarrPick = null;
+
 
 // Helper function to format dates in friendly format (e.g., "5 Oct 2025 10:12am")
 function formatFriendlyDate(dateString) {
@@ -1011,6 +1015,13 @@ function handleVersionChange() {
 document.addEventListener('DOMContentLoaded', function() {
     // Set initial button text
     handleVersionChange();
+
+    document.getElementById('lidarr-disambiguation-close')?.addEventListener('click', hideLidarrDisambiguationModal);
+    document.getElementById('lidarr-disambiguation-modal')?.addEventListener('click', (event) => {
+        if (event.target.id === 'lidarr-disambiguation-modal') {
+            hideLidarrDisambiguationModal();
+        }
+    });
 });
 
 // Update playlist count in sidebar
@@ -1059,13 +1070,42 @@ function formatNextRefresh(nextRefreshTime) {
     }
 }
 
-async function loadPlaylists() {
+function captureOpenMissingDetails() {
+    const container = document.getElementById('playlists-container');
+    if (!container) {
+        return new Set();
+    }
+    const openIds = new Set();
+    container.querySelectorAll('details[data-missing-details][open]').forEach((el) => {
+        if (el.id) {
+            openIds.add(el.id);
+        }
+    });
+    return openIds;
+}
+
+function restoreOpenMissingDetails(openIds) {
+    openIds.forEach((id) => {
+        const el = document.getElementById(id);
+        if (el) {
+            el.open = true;
+        }
+    });
+}
+
+async function loadPlaylists(options = {}) {
+    const preserveOpen = Boolean(options.preserveOpenDetails);
     const loadingDiv = document.getElementById('playlists-loading');
     const containerDiv = document.getElementById('playlists-container');
+    const openDetails = preserveOpen ? captureOpenMissingDetails() : null;
 
     setupPlaylistDeleteHandler();
+    setupLidarrHandler();
+    await fetchLidarrStatus();
 
-    loadingDiv.classList.remove('hidden');
+    if (!preserveOpen) {
+        loadingDiv.classList.remove('hidden');
+    }
     containerDiv.innerHTML = '';
 
     try {
@@ -1101,6 +1141,9 @@ async function loadPlaylists() {
         }
 
         renderPlaylists(playlists);
+        if (openDetails && openDetails.size > 0) {
+            restoreOpenMissingDetails(openDetails);
+        }
 
     } catch (error) {
         console.error('Error loading playlists:', error);
@@ -1154,6 +1197,194 @@ function setupPlaylistDeleteHandler() {
     });
 }
 
+function setupLidarrHandler() {
+    const container = document.getElementById('playlists-container');
+    if (!container || container.dataset.lidarrHandlerAttached === 'true') {
+        return;
+    }
+    container.dataset.lidarrHandlerAttached = 'true';
+    container.addEventListener('click', (event) => {
+        const button = event.target.closest('[data-action="lidarr-add"]');
+        if (!button) {
+            return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        const playlistId = Number(button.dataset.playlistId);
+        const index = Number(button.dataset.index);
+        const mode = button.dataset.mode;
+        submitLidarrAdd(playlistId, index, mode);
+    });
+}
+
+async function fetchLidarrStatus() {
+    try {
+        const response = await fetch('/api/lidarr/status');
+        if (response.ok) {
+            lidarrStatus = await response.json();
+        }
+    } catch (error) {
+        console.warn('Could not load Lidarr status:', error);
+    }
+
+    const noteEl = document.getElementById('lidarr-integration-note');
+    if (noteEl) {
+        const show = lidarrStatus.enabled && lidarrStatus.configured && lidarrStatus.reachable;
+        noteEl.classList.toggle('hidden', !show);
+    }
+}
+
+function renderLidarrBadge(track) {
+    const lidarr = track.lidarr || {};
+    const status = lidarr.status;
+    if (status === 'added_artist' || status === 'added_album') {
+        return '<span class="inline-block text-xs font-medium text-indigo-800 bg-indigo-100 rounded px-2 py-0.5 ml-1">In Lidarr</span>';
+    }
+    if (status === 'already_exists') {
+        return '<span class="inline-block text-xs font-medium text-gray-700 bg-gray-200 rounded px-2 py-0.5 ml-1">Already in Lidarr</span>';
+    }
+    if (status === 'error' || status === 'not_found') {
+        return '<span class="inline-block text-xs font-medium text-red-800 bg-red-100 rounded px-2 py-0.5 ml-1">Failed</span>';
+    }
+    return '';
+}
+
+function renderLidarrActions(playlistId, index, track) {
+    if (!lidarrStatus.enabled || !lidarrStatus.configured || !lidarrStatus.reachable) {
+        return '';
+    }
+
+    const lidarr = track.lidarr || {};
+    if (['added_artist', 'added_album', 'already_exists'].includes(lidarr.status)) {
+        return '';
+    }
+
+    const hasAlbum = Boolean(track.album && String(track.album).trim());
+    const albumControl = hasAlbum
+        ? `<button type="button" data-action="lidarr-add" data-mode="album" data-playlist-id="${playlistId}" data-index="${index}" class="text-xs font-medium text-indigo-700 hover:text-indigo-900 underline cursor-pointer border-none bg-transparent p-0">Add album</button>`
+        : `<span class="text-xs text-gray-400" title="No album metadata — add artist instead">Add album</span>`;
+
+    return `
+        <span class="inline-flex flex-wrap items-center gap-x-2 gap-y-1 mt-1 not-prose">
+            ${albumControl}
+            <button type="button" data-action="lidarr-add" data-mode="artist" data-playlist-id="${playlistId}" data-index="${index}" class="text-xs font-medium text-indigo-700 hover:text-indigo-900 underline cursor-pointer border-none bg-transparent p-0">Add artist</button>
+        </span>
+    `;
+}
+
+function hideLidarrDisambiguationModal() {
+    const modal = document.getElementById('lidarr-disambiguation-modal');
+    if (modal) {
+        modal.classList.add('hidden');
+        modal.setAttribute('aria-hidden', 'true');
+    }
+    pendingLidarrPick = null;
+}
+
+function showLidarrDisambiguationModal(playlistId, index, mode, candidates) {
+    const modal = document.getElementById('lidarr-disambiguation-modal');
+    const listEl = document.getElementById('lidarr-disambiguation-list');
+    const titleEl = document.getElementById('lidarr-disambiguation-title');
+    if (!modal || !listEl) {
+        return;
+    }
+
+    pendingLidarrPick = { playlistId, index, mode };
+    const modeLabel = mode === 'album' ? 'album' : 'artist';
+    if (titleEl) {
+        titleEl.textContent = `Multiple ${modeLabel} matches — choose one`;
+    }
+
+    listEl.innerHTML = candidates.map((candidate, candidateIndex) => {
+        const name = mode === 'album'
+            ? `${candidate.album_title || 'Unknown album'} — ${candidate.artist_name || 'Unknown artist'}`
+            : (candidate.artist_name || 'Unknown artist');
+        const disambiguation = candidate.disambiguation
+            ? `<span class="text-gray-500"> (${escapeHtml(candidate.disambiguation)})</span>`
+            : '';
+        return `
+            <button
+                type="button"
+                data-candidate-index="${candidateIndex}"
+                class="w-full text-left px-3 py-2 rounded-lg border border-gray-200 hover:bg-indigo-50 hover:border-indigo-200 text-sm"
+            >
+                ${escapeHtml(name)}${disambiguation}
+            </button>
+        `;
+    }).join('');
+
+    listEl.querySelectorAll('[data-candidate-index]').forEach((button) => {
+        button.addEventListener('click', () => {
+            const candidate = candidates[Number(button.dataset.candidateIndex)];
+            if (!candidate || !pendingLidarrPick) {
+                return;
+            }
+            const { playlistId: pid, index: idx, mode: pickMode } = pendingLidarrPick;
+            hideLidarrDisambiguationModal();
+            submitLidarrAdd(
+                pid,
+                idx,
+                pickMode,
+                candidate.foreign_artist_id || null,
+                candidate.foreign_album_id || null,
+            );
+        });
+    });
+
+    modal.classList.remove('hidden');
+    modal.setAttribute('aria-hidden', 'false');
+}
+
+async function submitLidarrAdd(playlistId, index, mode, foreignArtistId = null, foreignAlbumId = null) {
+    showToast('loading', 'Adding to Lidarr...', 0);
+
+    try {
+        const payload = { index, mode };
+        if (foreignArtistId) {
+            payload.foreign_artist_id = foreignArtistId;
+        }
+        if (foreignAlbumId) {
+            payload.foreign_album_id = foreignAlbumId;
+        }
+
+        const response = await fetch(`/api/playlists/${playlistId}/missing/lidarr`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+
+        const data = await response.json().catch(() => ({}));
+        hideToast(currentToast);
+
+        if (data.status === 'ambiguous') {
+            showLidarrDisambiguationModal(playlistId, index, mode, data.candidates || []);
+            return;
+        }
+
+        if (!response.ok) {
+            throw new Error(data.detail || data.message || 'Failed to add to Lidarr');
+        }
+
+        if (data.status === 'added_artist') {
+            showToast('success', `Added artist "${data.artist_name || 'artist'}" to Lidarr`);
+        } else if (data.status === 'added_album') {
+            showToast('success', `Added album "${data.album_title || 'album'}" to Lidarr`);
+        } else if (data.status === 'already_exists') {
+            showToast('success', 'Already in Lidarr');
+        } else if (data.status === 'not_found') {
+            showToast('error', data.message || 'No match found in Lidarr');
+        } else {
+            showToast('success', 'Lidarr updated');
+        }
+
+        loadPlaylists({ preserveOpenDetails: true });
+    } catch (error) {
+        hideToast(currentToast);
+        console.error('Lidarr add failed:', error);
+        showToast('error', error.message);
+    }
+}
+
 function renderMissingSuggestions(playlist) {
     const missing = playlist.recommended_missing || [];
     if (!missing.length) return '';
@@ -1161,16 +1392,24 @@ function renderMissingSuggestions(playlist) {
     const items = missing.map((track, index) => {
         const album = track.album ? ` — <span class="text-gray-500">${escapeHtml(track.album)}</span>` : '';
         const note = track.note ? `<p class="text-xs text-gray-500 mt-0.5 mb-0">${escapeHtml(track.note)}</p>` : '';
-        return `<li class="text-sm text-gray-700"><span class="font-medium">${escapeHtml(track.title)}</span> by ${escapeHtml(track.artist)}${album}${note}</li>`;
+        const badge = renderLidarrBadge(track);
+        const actions = renderLidarrActions(playlist.id, index, track);
+        return `
+            <li class="text-sm text-gray-700 list-none ml-0 pl-0">
+                <span class="font-medium">${escapeHtml(track.title)}</span> by ${escapeHtml(track.artist)}${album}${badge}
+                ${note}
+                ${actions}
+            </li>
+        `;
     }).join('');
 
-    const collapseId = `missing-${playlist.id}`;
+    const detailsId = `missing-details-${playlist.id}`;
     return `
-        <details class="mt-3 border border-amber-200 rounded-lg bg-amber-50/50">
+        <details id="${detailsId}" data-missing-details class="mt-3 border border-amber-200 rounded-lg bg-amber-50/50">
             <summary class="cursor-pointer text-sm font-medium text-amber-900 px-3 py-2">
                 Recommended but not in library (${missing.length})
             </summary>
-            <ul class="px-3 pb-3 space-y-2 list-disc list-inside" id="${collapseId}">
+            <ul class="px-3 pb-3 space-y-3 list-none" id="missing-${playlist.id}">
                 ${items}
             </ul>
         </details>

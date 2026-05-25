@@ -658,6 +658,9 @@
                           <p id="missing-recommendations-note" class="hidden text-sm text-amber-700 mt-2">
                               When enabled, AI may add extra tracks from your library that match suggestions. Playlists can be longer than the size you requested.
                           </p>
+                          <p id="lidarr-integration-note" class="hidden text-sm text-indigo-700 mt-2">
+                              Lidarr integration is enabled. Use Add artist or Add album on missing suggestions to queue acquisition.
+                          </p>
                       </div>
 
                       <!-- Loading State -->
@@ -820,6 +823,18 @@
     <div id="toast-container" class="absolute top-2 right-2 w-full max-w-sm z-50 space-y-3 pointer-events-none">
         <!-- Toasts will be dynamically inserted here -->   
     </div>
-    <script src="/static/app.js?v=1.0.1"></script>
+
+    <!-- Lidarr disambiguation modal -->
+    <div id="lidarr-disambiguation-modal" class="hidden fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/40" aria-hidden="true" role="dialog" aria-labelledby="lidarr-disambiguation-title">
+        <div class="bg-white rounded-lg shadow-xl max-w-md w-full p-5">
+            <div class="flex items-start justify-between mb-4">
+                <h2 id="lidarr-disambiguation-title" class="text-lg font-semibold text-gray-900">Choose a match</h2>
+                <button type="button" id="lidarr-disambiguation-close" class="text-gray-500 hover:text-gray-700 text-xl leading-none" aria-label="Close">&times;</button>
+            </div>
+            <p class="text-sm text-gray-600 mb-3">Lidarr found multiple matches. Pick the correct one.</p>
+            <div id="lidarr-disambiguation-list" class="space-y-2 max-h-72 overflow-y-auto"></div>
+        </div>
+    </div>
+    <script src="/static/app.js?v=1.0.3"></script>
 </body>
 </html>

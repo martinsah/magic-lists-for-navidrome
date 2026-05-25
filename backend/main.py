@@ -45,7 +45,7 @@ logging.getLogger('httpcore').setLevel(logging.WARNING)
 from .navidrome_client import NavidromeClient
 from .ai_client import AIClient
 from .database import DatabaseManager, get_db
-from .schemas import CreatePlaylistRequest, CreateGenrePlaylistRequest, Playlist, RediscoverWeeklyResponse, RediscoverWeeklyV2Response, CreateRediscoverPlaylistRequest, PlaylistWithScheduleInfo
+from .schemas import CreatePlaylistRequest, CreateGenrePlaylistRequest, Playlist, RediscoverWeeklyResponse, RediscoverWeeklyV2Response, CreateRediscoverPlaylistRequest, PlaylistWithScheduleInfo, LidarrAddRequest
 from .recipe_manager import recipe_manager
 from .rediscover import RediscoverWeekly, ReDiscoverV2Processor
 from .track_scoring import filter_tracks_for_this_is_playlist, filter_tracks_for_genre_mix
@@ -54,6 +54,7 @@ from .suggestion_service import (
     unpack_curation_result,
     missing_recommendations_enabled,
 )
+from .lidarr_service import LidarrService, lidarr_integration_enabled, lidarr_configured
 # SYSTEM CHECK FEATURE - START
 from .services.health_check_service import HealthCheckService
 # SYSTEM CHECK FEATURE - END
@@ -192,6 +193,10 @@ def get_ai_client():
     if ai_client is None:
         ai_client = AIClient()
     return ai_client
+
+
+def get_lidarr_service(db: DatabaseManager) -> LidarrService:
+    return LidarrService(db=db)
 
 @app.get("/", response_class=HTMLResponse)
 async def read_root(request: Request):
@@ -1348,6 +1353,78 @@ async def get_all_playlists(db: DatabaseManager = Depends(get_db)):
         return playlists
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch playlists: {str(e)}")
+
+
+@app.get("/api/lidarr/status")
+async def get_lidarr_status(db: DatabaseManager = Depends(get_db)):
+    """Return Lidarr integration configuration and reachability."""
+    service = get_lidarr_service(db)
+    return await service.get_status()
+
+
+@app.get("/api/lidarr/lookup")
+async def lidarr_lookup(
+    type: str = Query(..., pattern="^(artist|album)$"),
+    term: str = Query(..., min_length=1),
+    artist: Optional[str] = Query(None),
+    db: DatabaseManager = Depends(get_db),
+):
+    """Preview Lidarr lookup candidates for disambiguation."""
+    if not lidarr_integration_enabled() or not lidarr_configured():
+        raise HTTPException(status_code=400, detail="Lidarr integration is not enabled or configured")
+    try:
+        service = get_lidarr_service(db)
+        return await service.lookup(type, term, artist=artist)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Lidarr lookup failed: {exc}")
+
+
+@app.post("/api/playlists/{playlist_id}/missing/lidarr")
+async def add_missing_to_lidarr(
+    playlist_id: int,
+    request: LidarrAddRequest,
+    db: DatabaseManager = Depends(get_db),
+):
+    """Add one recommended-missing item to Lidarr as artist or album."""
+    if not lidarr_integration_enabled() or not lidarr_configured():
+        raise HTTPException(status_code=400, detail="Lidarr integration is not enabled or configured")
+
+    entries = await db.get_recommended_missing(playlist_id)
+    if not entries:
+        raise HTTPException(status_code=404, detail="Playlist has no missing recommendations")
+    if request.index < 0 or request.index >= len(entries):
+        raise HTTPException(status_code=400, detail="Invalid missing recommendation index")
+
+    suggestion = entries[request.index]
+    service = get_lidarr_service(db)
+
+    try:
+        result = await service.add_missing_item(
+            suggestion=suggestion,
+            mode=request.mode,
+            foreign_artist_id=request.foreign_artist_id,
+            foreign_album_id=request.foreign_album_id,
+        )
+    except Exception as exc:
+        scheduler_logger.error(f"Lidarr add failed: {exc}")
+        raise HTTPException(status_code=502, detail=f"Lidarr add failed: {exc}")
+
+    if result.get("status") == "ambiguous":
+        return result
+
+    if result.get("status") in ("added_artist", "added_album", "already_exists"):
+        await db.update_recommended_missing_entry(
+            playlist_id,
+            request.index,
+            {"lidarr": result},
+        )
+
+    return {
+        **result,
+        "index": request.index,
+        "playlist_id": playlist_id,
+    }
+
 
 @app.delete("/api/playlists/{playlist_id}")
 async def delete_playlist(playlist_id: int, db: DatabaseManager = Depends(get_db)):

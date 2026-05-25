@@ -14,6 +14,7 @@ def _decode_json_string(value: str) -> str:
 
 from .navidrome_client import NavidromeClient
 from .database import DatabaseManager
+from .lidarr_service import lidarr_integration_enabled
 
 
 def missing_recommendations_enabled() -> bool:
@@ -38,8 +39,15 @@ def suggestion_prompt_suffix() -> str:
     return (
         f" Also suggest up to {n} additional tracks NOT in the candidate list that would "
         f"strengthen this playlist. Return them in suggested_tracks as objects with "
-        f"title and artist only (omit album and note to save space). Only suggest tracks "
+        f"title, artist, and album when known (omit note to save space). Only suggest tracks "
         f"not already represented in the candidate list."
+        if lidarr_integration_enabled()
+        else (
+            f" Also suggest up to {n} additional tracks NOT in the candidate list that would "
+            f"strengthen this playlist. Return them in suggested_tracks as objects with "
+            f"title and artist only (omit album and note to save space). Only suggest tracks "
+            f"not already represented in the candidate list."
+        )
     )
 
 

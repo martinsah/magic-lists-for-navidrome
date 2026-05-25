@@ -31,6 +31,15 @@ class SuggestedMissingTrack(BaseModel):
     artist: str
     album: Optional[str] = None
     note: Optional[str] = None
+    lidarr: Optional[Dict[str, Any]] = None
+
+
+class LidarrAddRequest(BaseModel):
+    """Request to add a missing recommendation to Lidarr"""
+    index: int
+    mode: str  # artist | album
+    foreign_artist_id: Optional[str] = None
+    foreign_album_id: Optional[str] = None
 
 
 class Playlist(BaseModel):

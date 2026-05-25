@@ -54,6 +54,9 @@ class HealthCheckService:
         library_check = await self._check_navidrome_library_config()
         checks.append(library_check)
         # Library config is informational only, don't fail on it
+
+        lidarr_check = await self._check_lidarr_integration()
+        checks.append(lidarr_check)
             
         # Track Umami events
         await self._track_umami_events(all_passed, checks)
@@ -635,6 +638,49 @@ class HealthCheckService:
                 "status": "info",
                 "message": "Using automatic library detection",
                 "suggestion": "For multiple libraries: Set NAVIDROME_LIBRARY_ID in your .env file if you want to target a specific library"
+            }
+
+    async def _check_lidarr_integration(self) -> Dict[str, str]:
+        """Informational check for optional Lidarr integration."""
+        from ..lidarr_service import lidarr_integration_enabled, lidarr_configured, LidarrService
+
+        if not lidarr_integration_enabled():
+            return {
+                "name": "Lidarr Integration",
+                "status": "info",
+                "message": "Disabled (set ENABLE_LIDARR_INTEGRATION=true to enable)",
+                "suggestion": "",
+            }
+
+        if not lidarr_configured():
+            return {
+                "name": "Lidarr Integration",
+                "status": "info",
+                "message": "Enabled but not configured",
+                "suggestion": "Set LIDARR_URL and LIDARR_API_KEY to enable Add to Lidarr actions",
+            }
+
+        try:
+            status = await LidarrService().get_status()
+            if status.get("reachable"):
+                return {
+                    "name": "Lidarr Integration",
+                    "status": "success",
+                    "message": f"Connected (root folder: {status.get('root_folder', 'unknown')})",
+                    "suggestion": "",
+                }
+            return {
+                "name": "Lidarr Integration",
+                "status": "info",
+                "message": status.get("message", "Configured but unreachable"),
+                "suggestion": "Use LIDARR_URL=http://lidarr:8686 for Docker; add /lidarr only if behind a reverse-proxy subpath",
+            }
+        except Exception as exc:
+            return {
+                "name": "Lidarr Integration",
+                "status": "info",
+                "message": f"Configuration error: {exc}",
+                "suggestion": "Check LIDARR_URL, LIDARR_API_KEY, and LIDARR_ROOT_FOLDER",
             }
     
     async def _track_umami_events(self, all_passed: bool, checks: List[Dict[str, str]]):

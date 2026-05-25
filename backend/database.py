@@ -409,6 +409,52 @@ class DatabaseManager:
             ))
             await db.commit()
             return cursor.rowcount > 0
+
+    async def get_recommended_missing(self, playlist_id: int) -> Optional[List[Dict]]:
+        """Return recommended_missing list for a playlist."""
+        await self.init_db()
+
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT recommended_missing FROM playlists WHERE id = ?",
+                (playlist_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+                if not row or not row[0]:
+                    return []
+                return json.loads(row[0])
+
+    async def update_recommended_missing_entry(
+        self,
+        playlist_id: int,
+        index: int,
+        patch: Dict,
+    ) -> Optional[List[Dict]]:
+        """Merge patch into recommended_missing[index] and persist."""
+        entries = await self.get_recommended_missing(playlist_id) or []
+        if index < 0 or index >= len(entries):
+            return None
+
+        updated_entry = dict(entries[index])
+        if "lidarr" in patch:
+            existing_lidarr = dict(updated_entry.get("lidarr") or {})
+            existing_lidarr.update(patch["lidarr"])
+            updated_entry["lidarr"] = existing_lidarr
+        else:
+            updated_entry.update(patch)
+        entries[index] = updated_entry
+
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                UPDATE playlists
+                SET recommended_missing = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (json.dumps(entries), playlist_id),
+            )
+            await db.commit()
+        return entries
     
     async def create_scheduled_playlist(self, playlist_type: str, navidrome_playlist_id: str,
                                       refresh_frequency: str, next_refresh: datetime) -> ScheduledPlaylist:

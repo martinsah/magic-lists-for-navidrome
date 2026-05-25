@@ -10,6 +10,7 @@ MagicLists adds curated, evolving playlists similar to major streaming services,
 - **Genre Mix** — Creates curated playlists from genre collections using AI, with smart pre-filtering so large genres stay fast and reliable.
 - **Re-Discover** — Surfaces tracks you have not played recently, including a v2 flow with temporal analysis and two-phase AI curation.
 - **Recommended but missing** (optional) — After a playlist is created, the AI can suggest tracks not in the candidate pool. Matches found in your library are appended to the Navidrome playlist; others are listed in **Manage → Playlists** for acquisition.
+- **Lidarr integration** (optional) — Add missing suggestions to Lidarr as artist or album from **Manage → Playlists**.
 - **Auto-refresh** — Keep playlists fresh with daily, weekly, or monthly updates.
 - **Manage playlists** — View, delete, and inspect AI reasoning and missing-track suggestions from the web UI.
 - **Multi-library support** — Filter artists, genres, and curation by Navidrome music folder.
@@ -247,6 +248,25 @@ Navidrome playlists may end up **longer than the requested track count** when li
 
 Scheduled playlist refresh does not re-run the missing-track pass; it applies on create only.
 
+## Optional: Lidarr integration
+
+When enabled, **Manage → Playlists** shows **Add artist** and **Add album** actions on recommended missing tracks. MagicLists uses the Lidarr lookup API (MusicBrainz-backed) and optionally falls back to direct MusicBrainz recording search when results are ambiguous.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ENABLE_LIDARR_INTEGRATION` | `false` | Show Add to Lidarr UI actions |
+| `LIDARR_URL` | — | Lidarr API base URL (e.g. `http://lidarr:8686`; use `/lidarr` suffix only behind a reverse-proxy subpath) |
+| `LIDARR_API_KEY` | — | API key from Lidarr Settings → General |
+| `LIDARR_ROOT_FOLDER` | auto | Root folder path in Lidarr |
+| `LIDARR_QUALITY_PROFILE_ID` | auto | Quality profile ID |
+| `LIDARR_METADATA_PROFILE_ID` | auto | Metadata profile ID |
+| `LIDARR_SEARCH_ON_ADD` | `true` | Search for downloads after add |
+| `MUSICBRAINZ_USER_AGENT` | — | Identifiable User-Agent for MB fallback |
+
+**Add artist** monitors the artist per your Lidarr metadata profile. **Add album** requires album metadata on the suggestion (the AI includes album names when Lidarr integration is enabled). If Lidarr returns multiple matches, a picker lets you choose the correct artist or album.
+
+Lidarr has no track-level add API; album add is the closest match when you know the release.
+
 ## Troubleshooting
 
 ### Database write errors (500 on create)
@@ -294,6 +314,7 @@ On startup, MagicLists validates:
 - Artists API access
 - AI provider configuration
 - Multi-library setup
+- Lidarr integration (when enabled)
 
 Failed checks show actionable suggestions. You can re-run checks anytime from the UI.
 
@@ -313,7 +334,10 @@ Failed checks show actionable suggestions. You can re-run checks anytime from th
 | POST | `/api/create-rediscover-playlist` | Create Re-Discover v1 playlist |
 | POST | `/api/create-rediscover-playlist-v2` | Create Re-Discover v2 playlist |
 | GET | `/api/playlists` | List managed playlists (includes missing suggestions metadata) |
+| POST | `/api/playlists/{id}/missing/lidarr` | Add a missing suggestion to Lidarr (artist or album) |
 | DELETE | `/api/playlists/{id}` | Delete local record and Navidrome playlist |
+| GET | `/api/lidarr/status` | Lidarr integration status and configuration |
+| GET | `/api/lidarr/lookup` | Preview Lidarr lookup candidates |
 | GET | `/api/recipes` | List recipe versions |
 | GET | `/api/scheduler/status` | Scheduler status |
 | POST | `/api/scheduler/trigger` | Trigger refresh manually |
