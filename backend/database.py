@@ -274,6 +274,7 @@ class DatabaseManager:
                     p.playlist_length,
                     p.recommended_missing,
                     p.added_from_suggestions,
+                    p.library_ids,
                     sp.refresh_frequency,
                     sp.next_refresh,
                     sp.playlist_type
@@ -297,9 +298,10 @@ class DatabaseManager:
                         "playlist_length": row[9],
                         "recommended_missing": json.loads(row[10]) if row[10] else [],
                         "added_from_suggestions": row[11] or 0,
-                        "refresh_frequency": row[12],
-                        "next_refresh": row[13],
-                        "playlist_type": row[14],
+                        "library_ids": json.loads(row[12]) if row[12] else [],
+                        "refresh_frequency": row[13],
+                        "next_refresh": row[14],
+                        "playlist_type": row[15],
                     }
                     playlists.append(playlist_data)
         
