@@ -1,0 +1,246 @@
+/* Magic Lists dark theme — maps existing Tailwind utility classes */
+
+html.dark {
+    color-scheme: dark;
+}
+
+html.dark body {
+    background-color: #0b1220;
+    color: #e2e8f0;
+}
+
+html.dark header,
+html.dark #desktopSidebar,
+html.dark #mobileSidebar {
+    background-color: #0b1220 !important;
+}
+
+html.dark .bg-gray-100 {
+    background-color: #0b1220 !important;
+}
+
+html.dark .bg-white {
+    background-color: #151f33 !important;
+}
+
+html.dark .bg-gray-50 {
+    background-color: #1a2740 !important;
+}
+
+html.dark .bg-gray-200 {
+    background-color: #243352 !important;
+}
+
+html.dark .hover\:bg-gray-50:hover {
+    background-color: #1e2d47 !important;
+}
+
+html.dark .hover\:bg-gray-100:hover {
+    background-color: #1e2d47 !important;
+}
+
+html.dark .hover\:bg-gray-200:hover {
+    background-color: #2a3f5f !important;
+}
+
+html.dark .focus\:bg-gray-100:focus,
+html.dark .focus\:bg-gray-200:focus {
+    background-color: #243352 !important;
+}
+
+html.dark .text-gray-900,
+html.dark .text-black {
+    color: #f1f5f9 !important;
+}
+
+html.dark .text-gray-800 {
+    color: #e2e8f0 !important;
+}
+
+html.dark .text-gray-700 {
+    color: #cbd5e1 !important;
+}
+
+html.dark .text-gray-600 {
+    color: #94a3b8 !important;
+}
+
+html.dark .text-gray-500 {
+    color: #94a3b8 !important;
+}
+
+html.dark .text-gray-400 {
+    color: #64748b !important;
+}
+
+html.dark .border-gray-100 {
+    border-color: #1e293b !important;
+}
+
+html.dark .border-gray-200 {
+    border-color: #334155 !important;
+}
+
+html.dark .border-gray-300 {
+    border-color: #475569 !important;
+}
+
+html.dark .divide-gray-200 > :not([hidden]) ~ :not([hidden]) {
+    border-color: #334155 !important;
+}
+
+html.dark input[type="text"],
+html.dark input[type="number"],
+html.dark input[type="email"],
+html.dark input[type="search"],
+html.dark input[type="range"],
+html.dark select,
+html.dark textarea {
+    background-color: #151f33;
+    color: #e2e8f0;
+    border-color: #475569;
+}
+
+html.dark input[type="radio"],
+html.dark input[type="checkbox"] {
+    background-color: #151f33;
+    border-color: #64748b;
+}
+
+html.dark input[type="range"] {
+    accent-color: #818cf8;
+}
+
+html.dark .bg-green-50 {
+    background-color: #052e1a !important;
+}
+
+html.dark .border-green-200 {
+    border-color: #166534 !important;
+}
+
+html.dark .text-green-800,
+html.dark .text-green-700 {
+    color: #86efac !important;
+}
+
+html.dark .bg-blue-50 {
+    background-color: #172554 !important;
+}
+
+html.dark .border-blue-200 {
+    border-color: #1d4ed8 !important;
+}
+
+html.dark .text-blue-800,
+html.dark .text-blue-600,
+html.dark .text-blue-700 {
+    color: #93c5fd !important;
+}
+
+html.dark .bg-red-50 {
+    background-color: #450a0a !important;
+}
+
+html.dark .border-red-200,
+html.dark .border-red-300,
+html.dark .border-red-500 {
+    border-color: #b91c1c !important;
+}
+
+html.dark .text-red-800,
+html.dark .text-red-600 {
+    color: #fca5a5 !important;
+}
+
+html.dark .bg-indigo-50,
+html.dark .hover\:bg-indigo-50:hover {
+    background-color: #1e1b4b !important;
+}
+
+html.dark .hover\:border-indigo-200:hover {
+    border-color: #4f46e5 !important;
+}
+
+html.dark .text-indigo-800 {
+    color: #c7d2fe !important;
+}
+
+html.dark .text-indigo-700,
+html.dark .text-indigo-600,
+html.dark .hover\:text-indigo-900:hover,
+html.dark .hover\:text-indigo-800:hover {
+    color: #a5b4fc !important;
+}
+
+html.dark .bg-indigo-100 {
+    background-color: #312e81 !important;
+}
+
+html.dark .text-amber-700 {
+    color: #fcd34d !important;
+}
+
+html.dark .text-yellow-600,
+html.dark .text-yellow-400 {
+    color: #facc15 !important;
+}
+
+html.dark .bg-gray-900 {
+    background-color: #6366f1 !important;
+}
+
+html.dark .hover\:bg-gray-700:hover {
+    background-color: #4f46e5 !important;
+}
+
+html.dark .bg-black\/40 {
+    background-color: rgba(0, 0, 0, 0.65) !important;
+}
+
+html.dark .shadow-lg,
+html.dark .shadow-xl,
+html.dark .shadow-2xs {
+    box-shadow: 0 10px 25px rgba(0, 0, 0, 0.45) !important;
+}
+
+html.dark .hs-select-dropdown,
+html.dark [class*="hs-select-dropdown"] {
+    background-color: #151f33 !important;
+    border-color: #334155 !important;
+}
+
+html.dark [class*="scrollbar-track"]:bg-gray-100,
+html.dark .\[&\:\:-webkit-scrollbar-track\]\:bg-gray-100::-webkit-scrollbar-track {
+    background-color: #0b1220 !important;
+}
+
+html.dark [class*="scrollbar-thumb"]:bg-gray-300,
+html.dark .\[&\:\:-webkit-scrollbar-thumb\]\:bg-gray-300::-webkit-scrollbar-thumb {
+    background-color: #475569 !important;
+}
+
+html.dark #database-error-alert .border-red-100 {
+    border-color: #7f1d1d !important;
+}
+
+html.dark #database-error-alert .bg-red-200 {
+    background-color: #991b1b !important;
+}
+
+html.dark #database-error-alert .text-red-800 {
+    color: #fecaca !important;
+}
+
+html.dark img[alt="Magic Lists"] {
+    filter: brightness(0) invert(1);
+}
+
+html.dark a.text-indigo-600,
+html.dark .text-indigo-600 {
+    color: #a5b4fc !important;
+}
+
+html.dark a.border-indigo-200 {
+    border-color: #4338ca !important;
+}

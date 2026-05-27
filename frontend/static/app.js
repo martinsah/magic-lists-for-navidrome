@@ -190,7 +190,7 @@ function setActiveMenuItem(page) {
 // Navigation functionality
 function showContent(contentId) {
     // Hide all content sections
-    const contentSections = ['welcome-content', 'this-is-content', 'rediscover-content', 'genre-mix-content', 'manage-playlists-content', 'system-check-content', 'terms-content'];
+    const contentSections = ['welcome-content', 'this-is-content', 'rediscover-content', 'genre-mix-content', 'manage-playlists-content', 'system-check-content'];
     contentSections.forEach(id => {
         const element = document.getElementById(id);
         if (element) {
@@ -1990,9 +1990,6 @@ function updateURL(page) {
         case 'system-check':
             url = '/system-check';
             break;
-        case 'terms':
-            url = '/terms';
-            break;
         default:
             url = '/';
     }
@@ -2052,9 +2049,6 @@ function getPageFromURL(pathname) {
         case '/system-check':
             page = 'system-check';
             break;
-        case '/terms':
-            page = 'terms';
-            break;
         default:
             page = 'home';
             break;
@@ -2095,8 +2089,6 @@ function handlePageNavigation(page) {
         contentId = 'system-check-content';
         // Auto-run system checks when navigating to system check page
         setTimeout(() => runSystemChecks(), 100);
-    } else if (page === 'terms') {
-        contentId = 'terms-content';
     }
 
     setActiveMenuItem(page);

@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
@@ -24,6 +24,8 @@
     <!-- Preline UI -->
     <script src="https://cdn.jsdelivr.net/npm/preline@latest/dist/preline.min.js"></script>
 
+    <link rel="stylesheet" href="/static/dark-theme.css?v=1.0.0">
+
     <style>
         body {
             font-family: "Inter", sans-serif;
@@ -45,11 +47,11 @@
         }
     </style>
 </head>
-<body class="bg-gray-100">
+<body class="bg-gray-100 text-gray-100">
     <!-- Main container with flex layout -->
     <div id="magic" class="flex flex-col min-h-screen md:max-w-[1024px] md:mx-auto relative">
         <!-- Navbar -->
-        <header class="bg-gray-100 top-0 z-50">
+        <header class="bg-gray-100 top-0 z-50 border-b border-gray-200">
             <nav class="py-4 px-4"> 
                 <div class="flex items-center justify-between">
                     <div class="flex items-center">
@@ -180,7 +182,7 @@
                     <div class="relative flex flex-col h-full max-h-full">
                         <!-- Header with Brand and Close Button -->
                         <header class="p-4 flex justify-between items-center gap-x-2">
-                            <a class="flex-none font-semibold text-xl text-black focus:outline-none focus:opacity-80" href="#" aria-label="Brand">Magic Lists</a>
+                            <a class="flex-none font-semibold text-xl text-gray-900 focus:outline-none focus:opacity-80" href="#" aria-label="Brand">Magic Lists</a>
                             
                             <div class="-me-2">
                                 <!-- Close Button -->
@@ -764,67 +766,6 @@
                       </div>
                   </div>
 
-                <!-- Terms Content -->
-                <div id="terms-content" style="display: none;" class="p-4 pb-6 md:p-8 md:pb-10 bg-white md:border md:border-gray-200 md:rounded-lg">
-                    <h1 class="text-3xl font-bold text-gray-900 mb-6">A Few Things to Know</h1>
-                    
-                    <!-- Section 1: About This Project -->
-                    <section class="mb-8">
-                        <h2 class="text-xl font-semibold text-gray-800 mb-4">About This Project</h2>
-                        <p class="text-gray-700 leading-relaxed">
-                            This is an open-source research project born from years of frustration with music library management tools. We're exploring whether AI can match or exceed the playlist curation quality of major streaming platforms. This is experimental software built by music lovers, for music lovers.
-                        </p>
-                    </section>
-
-                    <!-- Section 2: Legal Disclaimer -->
-                    <section class="mb-8">
-                        <h2 class="text-xl font-semibold text-gray-800 mb-4">Legal Disclaimer</h2>
-                        
-                        <div class="space-y-6">
-                            <div>
-                                <h3 class="text-lg font-medium text-gray-800 mb-1">No Warranty</h3>
-                                <p class="text-gray-700 leading-relaxed">
-                                    This software is provided "as is" without warranty of any kind, express or implied.
-                                </p>
-                            </div>
-
-                            <div>
-                                <h3 class="text-lg font-medium text-gray-800 mb-2">User Responsibility</h3>
-                                <p class="text-gray-700  mb-2">You are solely responsible for:</p>
-                                <ul class="list-disc list-inside text-gray-700 space-y-1 ml-4">
-                                    <li>Ensuring you have proper rights to any music content processed through this application</li>
-                                    <li>Any data transmitted to third-party AI services</li>
-                                    <li>Backup of your music library before use</li>
-                                    <li>Any modifications made to your playlists or library</li>
-                                </ul>
-                            </div>
-
-                            <div>
-                                <h3 class="text-lg font-medium text-gray-800 mb-2">Limitation of Liability</h3>
-                                <p class="text-gray-700 ">
-                                    The developers shall not be liable for any damages including but not limited to data loss, corruption of music libraries, or any other direct or indirect damages arising from use of this software.
-                                </p>
-                            </div>
-
-                            <div>
-                                <h3 class="text-lg font-medium text-gray-800 mb-2">Third-party Services</h3>
-                                <p class="text-gray-700">
-                                    This application integrates with external AI services. Your use of these services is subject to their respective terms of service.
-                                </p>
-                            </div>
-                            <div>
-                                <h3 class="text-lg font-medium text-gray-800 mb-2">Acceptance</h3>
-                                <p class="text-gray-700">
-                                    By using this software, you acknowledge and accept these terms.
-                                </p>
-                            </div>
-                        </div>
-                    </section>
-
-                
-                </div>
-
-
             </main>
         </div>
 
@@ -832,7 +773,9 @@
         <footer class="py-5 px-4 mt-auto">
             <div class="flex flex-col md:flex-row justify-between items-center">
                 <div class="block w-full text-gray-500 text-center text-sm mb-2 md:mb-0">
-                    &copy; 2025 Made by <a href="https://synnotstudio.com" class="text-indigo-600 hover:text-indigo-800 transition-color border-b border-indigo-200 ">Synnot Studio</a> - <a href="#" data-page="terms" class="ttext-indigo-600 hover:text-indigo-800 transition-color border-b border-indigo-200">Terms</a> – Open Source (MIT)
+                    <a href="https://github.com/martinsah/magic-lists-for-navidrome" class="text-indigo-600 hover:text-indigo-800 transition-color border-b border-indigo-200" target="_blank" rel="noopener noreferrer">GitHub</a>
+                    –
+                    <a href="https://mit-license.org/" class="text-indigo-600 hover:text-indigo-800 transition-color border-b border-indigo-200" target="_blank" rel="noopener noreferrer">MIT License</a>
                 </div>
             </div>
         </footer>
@@ -887,6 +830,6 @@
             </div>
         </div>
     </div>
-    <script src="/static/app.js?v=1.0.6"></script>
+    <script src="/static/app.js?v=1.0.8"></script>
 </body>
 </html>
