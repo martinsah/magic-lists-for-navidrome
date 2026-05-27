@@ -783,6 +783,7 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}{suggestion_promp
             system_prompt = (
                 f"You are a professional music curator creating a '{genre}' Genre Mix playlist. "
                 f"Select exactly {num_tracks} tracks using the i field (index) from the candidate list. "
+                f"Tracks marked h=true are a deterministic heuristic draft; preserve most of them unless a reserve candidate clearly improves flow. "
                 f"Prioritize variety: avoid back-to-back tracks from the same album. "
                 f"Prefer higher play_count and local_library_likes. "
                 f"Use at most {max_per_album} tracks per album. "
@@ -799,6 +800,7 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}{suggestion_promp
                     "a": track.get("artist", "Unknown"),
                     "p": track.get("play_count", 0),
                     "l": track.get("local_library_likes", False),
+                    "h": track.get("_heuristic_seed", False),
                 })
 
             print(f"🔢 Using index-based approach for {len(track_id_map)} tracks")
@@ -810,7 +812,8 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}{suggestion_promp
             )
             user_content = (
                 f"genre_mix: Select exactly {num_tracks} tracks for '{genre}'. "
-                f"Candidates (i=index, t=title, a=artist, p=play_count, l=liked): "
+                f"{variety_context or ''} "
+                f"Candidates (i=index, t=title, a=artist, p=play_count, l=liked, h=heuristic_seed): "
                 f"{json.dumps(indexed_tracks, separators=(',', ':'), ensure_ascii=False)}. "
                 f"{reasoning_hint}"
             )

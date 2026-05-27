@@ -8,7 +8,7 @@ import uvicorn
 import os
 import logging
 import logging.handlers
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -45,10 +45,11 @@ logging.getLogger('httpcore').setLevel(logging.WARNING)
 from .navidrome_client import NavidromeClient
 from .ai_client import AIClient
 from .database import DatabaseManager, get_db
-from .schemas import CreatePlaylistRequest, CreateGenrePlaylistRequest, Playlist, RediscoverWeeklyResponse, RediscoverWeeklyV2Response, CreateRediscoverPlaylistRequest, PlaylistWithScheduleInfo, LidarrAddRequest
+from .schemas import CreatePlaylistRequest, CreateGenrePlaylistRequest, Playlist, RediscoverWeeklyResponse, RediscoverWeeklyV2Response, CreateRediscoverPlaylistRequest, PlaylistWithScheduleInfo, LidarrAddRequest, LidarrBulkAddRequest, PlaylistSettingsRequest, ScheduledPlaylist
 from .recipe_manager import recipe_manager
 from .rediscover import RediscoverWeekly, ReDiscoverV2Processor
-from .track_scoring import filter_tracks_for_this_is_playlist, filter_tracks_for_genre_mix
+from .track_scoring import filter_tracks_for_this_is_playlist
+from .curation_strategy import SCORING_VERSION, assemble_playlist_candidates
 from .suggestion_service import (
     process_playlist_suggestions,
     unpack_curation_result,
@@ -419,7 +420,12 @@ async def create_playlist(
             reasoning=reasoning,
             navidrome_playlist_id=navidrome_playlist_id,
             playlist_length=request.playlist_length,
-            library_ids=request.library_ids
+            library_ids=request.library_ids,
+            curation_options={
+                "artist_concentration": request.artist_concentration,
+                "album_concentration": request.album_concentration,
+                "llm_polish": request.llm_polish,
+            },
         )
 
         recommended_missing = []
@@ -568,34 +574,60 @@ async def create_genre_playlist(
         if not all_tracks:
             raise HTTPException(status_code=404, detail=f"No tracks found for genre: {request.genre}")
 
-        # NEW: Apply smart filtering for "Genre Mix" playlists to optimize LLM payload
+        # Assemble a deterministic draft from the full genre slice before any LLM pass.
         library_stats = await nav_client.get_library_stats()
-
-        filtered_tracks, filter_metadata = filter_tracks_for_genre_mix(
-            source_tracks=all_tracks,
-            target_playlist_size=request.playlist_length,
-            library_stats=library_stats
+        assembly = assemble_playlist_candidates(
+            tracks=all_tracks,
+            target_size=request.playlist_length,
+            library_stats=library_stats,
+            artist_concentration=request.artist_concentration,
+            album_concentration=request.album_concentration,
+        )
+        assembly_metadata = assembly["metadata"]
+        await db.record_scoring_run(
+            source_key=f"navidrome:{nav_client.base_url}",
+            recipe_id=f"genre_mix:{request.genre}",
+            scoring_version=SCORING_VERSION,
+            params=assembly_metadata,
+            scored_tracks=assembly["scored_tracks"],
         )
 
         # Log filtering results for analytics/debugging
-        if filter_metadata['filtered']:
-            scheduler_logger.info(f"🎯 Genre mix filtering applied: {filter_metadata['source_count']} → {filter_metadata['sent_count']} tracks (LLM cap: {filter_metadata['max_llm_tracks']})")
-            scheduler_logger.info(f"📊 Score range: {filter_metadata['score_range']['highest']:.1f} - {filter_metadata['score_range']['lowest']:.1f} (cutoff: {filter_metadata['score_range']['cutoff']:.1f})")
-        else:
-            scheduler_logger.info(f"✅ No genre mix filtering needed: {filter_metadata['source_count']} tracks within LLM cap")
-
-        # Use filtered tracks for LLM processing
-        tracks_for_llm = filtered_tracks
-
-        # Use AI to curate the playlist (always include reasoning for new recipe format)
-        curation_result = await ai_client_instance.curate_genre_mix(
-            genre=request.genre,
-            tracks_json=tracks_for_llm,
-            num_tracks=request.playlist_length,
-            include_reasoning=True
+        scheduler_logger.info(
+            "🎯 Genre mix heuristic assembly: "
+            f"{assembly_metadata['source_count']} source tracks → "
+            f"{assembly_metadata['selected_count']} draft tracks "
+            f"(artist cap: {assembly_metadata['artist_cap']}, album cap: {assembly_metadata['album_cap']})"
         )
 
-        curated_track_ids, reasoning, suggested_tracks = unpack_curation_result(curation_result)
+        selected_tracks = []
+        for track in assembly["selected_tracks"]:
+            annotated = dict(track)
+            annotated["_heuristic_seed"] = True
+            selected_tracks.append(annotated)
+        tracks_for_llm = selected_tracks + assembly["reserve_tracks"]
+
+        if request.llm_polish:
+            # Use AI as a polish/repair pass over the deterministic draft and reserves.
+            curation_result = await ai_client_instance.curate_genre_mix(
+                genre=request.genre,
+                tracks_json=tracks_for_llm,
+                num_tracks=request.playlist_length,
+                include_reasoning=True,
+                variety_context=(
+                    f"Heuristic draft uses artist_concentration={request.artist_concentration:.2f}; "
+                    "prefer the h=true draft tracks unless replacing one improves variety or flow."
+                ),
+            )
+
+            curated_track_ids, reasoning, suggested_tracks = unpack_curation_result(curation_result)
+        else:
+            curated_track_ids = [track["id"] for track in assembly["selected_tracks"]]
+            reasoning = (
+                "Heuristic curation: selected tracks by local engagement while limiting repeated artists "
+                f"to {assembly_metadata['artist_cap']} and repeated albums to {assembly_metadata['album_cap']}."
+            )
+            suggested_tracks = []
 
         # Check for validation failures or empty results
         if not curated_track_ids:
@@ -1036,6 +1068,53 @@ def calculate_next_refresh(frequency: str) -> datetime:
     else:
         return now  # Fallback
 
+def normalize_refresh_frequency(frequency: Optional[str]) -> str:
+    """Normalize UI refresh values to scheduler values."""
+    value = (frequency or "none").lower()
+    if value in ("never", "manual"):
+        return "none"
+    if value not in ("none", "daily", "weekly", "monthly"):
+        raise ValueError("refresh_frequency must be one of none, daily, weekly, monthly")
+    return value
+
+def infer_playlist_type(playlist: Dict[str, Any]) -> str:
+    """Infer playlist type for rows that do not currently have a schedule."""
+    existing_type = playlist.get("playlist_type")
+    if existing_type:
+        return existing_type
+    artist_id = playlist.get("artist_id")
+    playlist_name = playlist.get("playlist_name") or ""
+    if artist_id in ("rediscover", "rediscover_v2"):
+        return "rediscover"
+    if playlist_name.startswith("Genre Mix:"):
+        return "genre_mix"
+    return "this_is"
+
+def scheduled_from_playlist(playlist: Dict[str, Any], refresh_frequency: Optional[str] = None) -> ScheduledPlaylist:
+    """Create a ScheduledPlaylist-like object for immediate refresh calls."""
+    frequency = normalize_refresh_frequency(refresh_frequency or playlist.get("refresh_frequency") or "none")
+    return ScheduledPlaylist(
+        id=playlist.get("schedule_id") or 0,
+        playlist_type=infer_playlist_type(playlist),
+        navidrome_playlist_id=playlist["navidrome_playlist_id"],
+        refresh_frequency=frequency,
+        next_refresh=playlist.get("next_refresh") or datetime.now().isoformat(),
+        created_at=playlist.get("created_at") or datetime.now().isoformat(),
+        updated_at=playlist.get("updated_at") or datetime.now().isoformat(),
+    )
+
+async def refresh_one_playlist_now(playlist: Dict[str, Any], db: DatabaseManager):
+    """Refresh one playlist using the same handlers as the scheduler."""
+    scheduled_playlist = scheduled_from_playlist(playlist)
+    if scheduled_playlist.playlist_type in ("rediscover", "rediscover_weekly_v2"):
+        await refresh_rediscover_playlist(scheduled_playlist, db)
+    elif scheduled_playlist.playlist_type == "this_is":
+        await refresh_this_is_playlist(scheduled_playlist, db)
+    elif scheduled_playlist.playlist_type == "genre_mix":
+        await refresh_genre_mix_playlist(scheduled_playlist, db)
+    else:
+        raise ValueError(f"Unsupported playlist type: {scheduled_playlist.playlist_type}")
+
 def schedule_playlist_refresh():
     """Schedule the playlist refresh job to run every 12 hours"""
     if not scheduler.get_job('playlist_refresh'):
@@ -1104,7 +1183,7 @@ async def refresh_scheduled_playlists():
                 overdue_hours = (current_time - scheduled_time).total_seconds() / 3600
                 scheduler_logger.info(f"🕐 Catching up on overdue playlist {scheduled_playlist.navidrome_playlist_id} (missed by {overdue_hours:.1f} hours)")
             
-            if scheduled_playlist.playlist_type == "rediscover":
+            if scheduled_playlist.playlist_type in ("rediscover", "rediscover_weekly_v2"):
                 await refresh_rediscover_playlist(scheduled_playlist, db)
             elif scheduled_playlist.playlist_type == "this_is":
                 await refresh_this_is_playlist(scheduled_playlist, db)
@@ -1366,6 +1445,10 @@ async def refresh_genre_mix_playlist(scheduled_playlist, db: DatabaseManager):
         genre = original_playlist["artist_id"]
         original_length = original_playlist.get("playlist_length", 25)
         library_ids = original_playlist.get("library_ids") or None
+        curation_options = original_playlist.get("curation_options") or {}
+        artist_concentration = float(curation_options.get("artist_concentration", 0.35))
+        album_concentration = float(curation_options.get("album_concentration", 0.25))
+        llm_polish = bool(curation_options.get("llm_polish", True))
 
         scheduler_logger.info(f"🎯 Refreshing Genre Mix '{genre}' with original length: {original_length}")
 
@@ -1381,28 +1464,51 @@ async def refresh_genre_mix_playlist(scheduled_playlist, db: DatabaseManager):
             original_length = len(all_tracks)
 
         library_stats = await nav_client.get_library_stats()
-        filtered_tracks, filter_metadata = filter_tracks_for_genre_mix(
-            source_tracks=all_tracks,
-            target_playlist_size=original_length,
+        assembly = assemble_playlist_candidates(
+            tracks=all_tracks,
+            target_size=original_length,
             library_stats=library_stats,
+            artist_concentration=artist_concentration,
+            album_concentration=album_concentration,
+        )
+        assembly_metadata = assembly["metadata"]
+        await db.record_scoring_run(
+            source_key=f"navidrome:{nav_client.base_url}",
+            recipe_id=f"genre_mix:{genre}",
+            scoring_version=SCORING_VERSION,
+            params=assembly_metadata,
+            scored_tracks=assembly["scored_tracks"],
         )
 
-        if filter_metadata["filtered"]:
-            scheduler_logger.info(
-                f"🎯 Genre mix filtering applied: {filter_metadata['source_count']} → "
-                f"{filter_metadata['sent_count']} tracks (LLM cap: {filter_metadata['max_llm_tracks']})"
+        scheduler_logger.info(
+            "🎯 Genre mix heuristic assembly: "
+            f"{assembly_metadata['source_count']} source tracks → "
+            f"{assembly_metadata['selected_count']} draft tracks "
+            f"(artist cap: {assembly_metadata['artist_cap']}, album cap: {assembly_metadata['album_cap']})"
+        )
+
+        selected_tracks = []
+        for track in assembly["selected_tracks"]:
+            annotated = dict(track)
+            annotated["_heuristic_seed"] = True
+            selected_tracks.append(annotated)
+        tracks_for_llm = selected_tracks + assembly["reserve_tracks"]
+        if llm_polish:
+            curation_result = await ai_client_instance.curate_genre_mix(
+                genre=genre,
+                tracks_json=tracks_for_llm,
+                num_tracks=original_length,
+                include_reasoning=True,
+                variety_context="This is a scheduled refresh. Preserve most h=true draft tracks unless reserves improve flow.",
             )
+
+            curated_track_ids, reasoning, _suggested_tracks = unpack_curation_result(curation_result)
         else:
-            scheduler_logger.info(f"✅ No genre mix filtering needed: {filter_metadata['source_count']} tracks within LLM cap")
-
-        curation_result = await ai_client_instance.curate_genre_mix(
-            genre=genre,
-            tracks_json=filtered_tracks,
-            num_tracks=original_length,
-            include_reasoning=True,
-        )
-
-        curated_track_ids, reasoning, _suggested_tracks = unpack_curation_result(curation_result)
+            curated_track_ids = [track["id"] for track in assembly["selected_tracks"]]
+            reasoning = (
+                "Heuristic curation: selected tracks by local engagement while limiting repeated artists "
+                f"to {assembly_metadata['artist_cap']} and repeated albums to {assembly_metadata['album_cap']}."
+            )
 
         if curated_track_ids:
             if len(curated_track_ids) < original_length and len(all_tracks) >= original_length:
@@ -1457,6 +1563,73 @@ async def get_all_playlists(db: DatabaseManager = Depends(get_db)):
         return playlists
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch playlists: {str(e)}")
+
+
+@app.patch("/api/playlists/{playlist_id}/settings")
+async def update_playlist_settings(
+    playlist_id: int,
+    request: PlaylistSettingsRequest,
+    db: DatabaseManager = Depends(get_db),
+):
+    """Update editable playlist settings and schedule metadata."""
+    if request.playlist_length < 1 or request.playlist_length > 500:
+        raise HTTPException(status_code=400, detail="playlist_length must be between 1 and 500")
+
+    try:
+        refresh_frequency = normalize_refresh_frequency(request.refresh_frequency)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    playlist = await db.get_playlist_by_id_with_schedule_info(playlist_id)
+    if not playlist:
+        raise HTTPException(status_code=404, detail="Playlist not found")
+
+    navidrome_playlist_id = playlist.get("navidrome_playlist_id")
+    if not navidrome_playlist_id:
+        raise HTTPException(status_code=400, detail="Playlist is missing Navidrome playlist ID")
+
+    await db.update_playlist_settings(playlist_id, request.playlist_length)
+
+    if refresh_frequency == "none":
+        await db.delete_scheduled_playlist_by_navidrome_id(navidrome_playlist_id)
+    else:
+        await db.upsert_scheduled_playlist(
+            playlist_type=infer_playlist_type(playlist),
+            navidrome_playlist_id=navidrome_playlist_id,
+            refresh_frequency=refresh_frequency,
+            next_refresh=calculate_next_refresh(refresh_frequency),
+        )
+        schedule_playlist_refresh()
+
+    updated = await db.get_playlist_by_id_with_schedule_info(playlist_id)
+    if updated:
+        songs = updated.get("songs", [])
+        updated["track_count"] = len(songs) if isinstance(songs, list) else 0
+    return updated
+
+
+@app.post("/api/playlists/{playlist_id}/refresh")
+async def refresh_playlist_now(playlist_id: int, db: DatabaseManager = Depends(get_db)):
+    """Refresh one playlist immediately."""
+    playlist = await db.get_playlist_by_id_with_schedule_info(playlist_id)
+    if not playlist:
+        raise HTTPException(status_code=404, detail="Playlist not found")
+    if not playlist.get("navidrome_playlist_id"):
+        raise HTTPException(status_code=400, detail="Playlist is missing Navidrome playlist ID")
+
+    try:
+        await refresh_one_playlist_now(playlist, db)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        scheduler_logger.error(f"❌ Manual playlist refresh failed: {exc}")
+        raise HTTPException(status_code=500, detail=f"Failed to refresh playlist: {exc}")
+
+    updated = await db.get_playlist_by_id_with_schedule_info(playlist_id)
+    if updated:
+        songs = updated.get("songs", [])
+        updated["track_count"] = len(songs) if isinstance(songs, list) else 0
+    return updated
 
 
 @app.get("/api/lidarr/status")
@@ -1526,6 +1699,48 @@ async def add_missing_to_lidarr(
     return {
         **result,
         "index": request.index,
+        "playlist_id": playlist_id,
+    }
+
+
+@app.post("/api/playlists/{playlist_id}/missing/lidarr/bulk")
+async def add_all_missing_to_lidarr(
+    playlist_id: int,
+    request: LidarrBulkAddRequest,
+    db: DatabaseManager = Depends(get_db),
+):
+    """Add all recommended-missing items to Lidarr with runtime options."""
+    if not lidarr_integration_enabled() or not lidarr_configured():
+        raise HTTPException(status_code=400, detail="Lidarr integration is not enabled or configured")
+
+    entries = await db.get_recommended_missing(playlist_id)
+    if not entries:
+        raise HTTPException(status_code=404, detail="Playlist has no missing recommendations")
+
+    service = get_lidarr_service(db)
+    try:
+        result = await service.add_missing_items_bulk(
+            suggestions=entries,
+            search=request.search,
+            monitor_only_target_album=request.monitor_only_target_album,
+            skip_ambiguous=request.skip_ambiguous,
+            prefer_album=request.prefer_album,
+        )
+    except Exception as exc:
+        scheduler_logger.error(f"Lidarr bulk add failed: {exc}")
+        raise HTTPException(status_code=502, detail=f"Lidarr bulk add failed: {exc}")
+
+    for item_result in result.get("results", []):
+        index = item_result.get("index")
+        if isinstance(index, int):
+            await db.update_recommended_missing_entry(
+                playlist_id,
+                index,
+                {"lidarr": item_result},
+            )
+
+    return {
+        **result,
         "playlist_id": playlist_id,
     }
 

@@ -90,6 +90,16 @@ class LidarrClient:
         response.raise_for_status()
         return response.json()
 
+    async def _put(self, path: str, payload: Dict[str, Any]) -> Any:
+        await self._ensure_base_url()
+        response = await self.client.put(
+            f"{self.base_url}{path}",
+            json=payload,
+            headers=self._headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
     async def ping(self) -> bool:
         try:
             await self._ensure_base_url()
@@ -128,6 +138,27 @@ class LidarrClient:
     async def add_album(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         result = await self._post("/api/v1/album", payload)
         return result if isinstance(result, dict) else {}
+
+    async def update_album(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        album_id = payload.get("id")
+        if not album_id:
+            raise ValueError("Lidarr album id is required for update")
+        result = await self._put(f"/api/v1/album/{album_id}", payload)
+        return result if isinstance(result, dict) else {}
+
+    async def update_artist(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        artist_id = payload.get("id")
+        if not artist_id:
+            raise ValueError("Lidarr artist id is required for update")
+        result = await self._put(f"/api/v1/artist/{artist_id}", payload)
+        return result if isinstance(result, dict) else {}
+
+    async def run_command(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        result = await self._post("/api/v1/command", payload)
+        return result if isinstance(result, dict) else {}
+
+    async def search_album(self, album_id: int) -> Dict[str, Any]:
+        return await self.run_command({"name": "AlbumSearch", "albumIds": [album_id]})
 
     async def get_albums_by_artist(self, artist_id: int) -> List[Dict[str, Any]]:
         results = await self._get("/api/v1/album", {"artistId": artist_id})

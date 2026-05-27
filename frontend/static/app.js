@@ -12,26 +12,25 @@ let allLibraries = [];
 // Lidarr integration (loaded when viewing Manage Playlists)
 let lidarrStatus = { enabled: false, configured: false, reachable: false };
 let pendingLidarrPick = null;
+let pendingBulkLidarrPlaylistId = null;
+const expandedPlaylistIds = new Set();
 
 
-// Helper function to format dates in friendly format (e.g., "5 Oct 2025 10:12am")
-function formatFriendlyDate(dateString) {
+// Format dates as YYYY-MM-DD (local calendar date)
+function formatDisplayDate(dateString) {
     if (!dateString) return 'Never';
-    
+
     const date = new Date(dateString);
-    const day = date.getDate();
-    const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-                        'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-    const month = monthNames[date.getMonth()];
+    if (Number.isNaN(date.getTime())) return 'Never';
+
     const year = date.getFullYear();
-    
-    let hours = date.getHours();
-    const minutes = date.getMinutes().toString().padStart(2, '0');
-    const ampm = hours >= 12 ? 'pm' : 'am';
-    hours = hours % 12;
-    hours = hours ? hours : 12; // 0 should be 12
-    
-    return `${day} ${month} ${year} ${hours}:${minutes}${ampm}`;
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+}
+
+function formatFriendlyDate(dateString) {
+    return formatDisplayDate(dateString);
 }
 
 // Toast utility functions
@@ -897,6 +896,9 @@ async function createGenrePlaylist() {
     try {
         const refreshFrequency = document.querySelector('input[name="genre-refresh-frequency"]:checked').value;
         const playlistLength = document.querySelector('input[name="genre-playlist-length"]:checked').value;
+        const artistConcentration = parseFloat(document.getElementById('genre-artist-concentration')?.value || '0.35');
+        const albumConcentration = parseFloat(document.getElementById('genre-album-concentration')?.value || '0.25');
+        const llmPolish = document.getElementById('genre-llm-polish')?.checked ?? true;
 
         const response = await fetch('/api/create_genre_playlist', {
             method: 'POST',
@@ -907,7 +909,10 @@ async function createGenrePlaylist() {
                 genre: selectedGenre,
                 refresh_frequency: refreshFrequency,
                 playlist_length: parseInt(playlistLength),
-                library_ids: selectedLibraryIds
+                library_ids: selectedLibraryIds,
+                artist_concentration: artistConcentration,
+                album_concentration: albumConcentration,
+                llm_polish: llmPolish
             })
         });
 
@@ -1022,6 +1027,14 @@ document.addEventListener('DOMContentLoaded', function() {
             hideLidarrDisambiguationModal();
         }
     });
+    document.getElementById('lidarr-bulk-close')?.addEventListener('click', hideBulkLidarrModal);
+    document.getElementById('lidarr-bulk-cancel')?.addEventListener('click', hideBulkLidarrModal);
+    document.getElementById('lidarr-bulk-submit')?.addEventListener('click', submitBulkLidarrAdd);
+    document.getElementById('lidarr-bulk-modal')?.addEventListener('click', (event) => {
+        if (event.target.id === 'lidarr-bulk-modal') {
+            hideBulkLidarrModal();
+        }
+    });
 });
 
 // Update playlist count in sidebar
@@ -1051,23 +1064,15 @@ async function updatePlaylistCount() {
 }
 
 // Manage Playlists functionality
-// Format next refresh time in a user-friendly way
+// Format next refresh as YYYY-MM-DD plus local time
 function formatNextRefresh(nextRefreshTime) {
     const nextRefresh = new Date(nextRefreshTime);
-    const now = new Date();
-    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const tomorrow = new Date(today.getTime() + 24 * 60 * 60 * 1000);
-    const nextRefreshDate = new Date(nextRefresh.getFullYear(), nextRefresh.getMonth(), nextRefresh.getDate());
-    
-    const timeString = nextRefresh.toLocaleTimeString('en-US', {hour: '2-digit', minute: '2-digit', hour12: true});
-    
-    if (nextRefreshDate.getTime() === today.getTime()) {
-        return `${timeString} today`;
-    } else if (nextRefreshDate.getTime() === tomorrow.getTime()) {
-        return `${timeString} tomorrow`;
-    } else {
-        return `${nextRefresh.toLocaleDateString('en-GB')} ${timeString}`;
-    }
+    if (Number.isNaN(nextRefresh.getTime())) return 'None';
+
+    const datePart = formatDisplayDate(nextRefreshTime);
+    const hours = String(nextRefresh.getHours()).padStart(2, '0');
+    const minutes = String(nextRefresh.getMinutes()).padStart(2, '0');
+    return `${datePart} ${hours}:${minutes}`;
 }
 
 function captureOpenMissingDetails() {
@@ -1101,6 +1106,7 @@ async function loadPlaylists(options = {}) {
 
     setupPlaylistDeleteHandler();
     setupLidarrHandler();
+    setupPlaylistManagementHandler();
     await fetchLidarrStatus();
 
     if (!preserveOpen) {
@@ -1217,6 +1223,49 @@ function setupLidarrHandler() {
     });
 }
 
+function setupPlaylistManagementHandler() {
+    const container = document.getElementById('playlists-container');
+    if (!container || container.dataset.playlistManagementHandlerAttached === 'true') {
+        return;
+    }
+    container.dataset.playlistManagementHandlerAttached = 'true';
+    container.addEventListener('click', (event) => {
+        const actionEl = event.target.closest('[data-action]');
+        if (!actionEl) {
+            return;
+        }
+
+        const action = actionEl.dataset.action;
+        if (![
+            'toggle-playlist-details',
+            'save-playlist-settings',
+            'refresh-playlist-now',
+            'lidarr-add-all',
+        ].includes(action)) {
+            return;
+        }
+
+        event.preventDefault();
+        event.stopPropagation();
+        const playlistId = Number(actionEl.dataset.playlistId);
+
+        if (action === 'toggle-playlist-details') {
+            if (expandedPlaylistIds.has(playlistId)) {
+                expandedPlaylistIds.delete(playlistId);
+            } else {
+                expandedPlaylistIds.add(playlistId);
+            }
+            loadPlaylists({ preserveOpenDetails: true });
+        } else if (action === 'save-playlist-settings') {
+            savePlaylistSettings(playlistId);
+        } else if (action === 'refresh-playlist-now') {
+            refreshPlaylistNow(playlistId);
+        } else if (action === 'lidarr-add-all') {
+            showBulkLidarrModal(playlistId);
+        }
+    });
+}
+
 async function fetchLidarrStatus() {
     try {
         const response = await fetch('/api/lidarr/status');
@@ -1237,7 +1286,7 @@ async function fetchLidarrStatus() {
 function renderLidarrBadge(track) {
     const lidarr = track.lidarr || {};
     const status = lidarr.status;
-    if (status === 'added_artist' || status === 'added_album') {
+    if (status === 'added_artist' || status === 'added_album' || status === 'monitored_album') {
         return '<span class="inline-block text-xs font-medium text-indigo-800 bg-indigo-100 rounded px-2 py-0.5 ml-1">In Lidarr</span>';
     }
     if (status === 'already_exists') {
@@ -1255,7 +1304,7 @@ function renderLidarrActions(playlistId, index, track) {
     }
 
     const lidarr = track.lidarr || {};
-    if (['added_artist', 'added_album', 'already_exists'].includes(lidarr.status)) {
+    if (['added_artist', 'added_album', 'monitored_album', 'already_exists'].includes(lidarr.status)) {
         return '';
     }
 
@@ -1385,34 +1434,243 @@ async function submitLidarrAdd(playlistId, index, mode, foreignArtistId = null, 
     }
 }
 
-function renderMissingSuggestions(playlist) {
+async function savePlaylistSettings(playlistId) {
+    const trackCountInput = document.getElementById(`playlist-track-count-${playlistId}`);
+    const refreshSelect = document.getElementById(`playlist-refresh-frequency-${playlistId}`);
+    const playlistLength = Number(trackCountInput?.value || 0);
+    const refreshFrequency = refreshSelect?.value || 'none';
+
+    if (!playlistLength || playlistLength < 1) {
+        showToast('warning', 'Track count must be at least 1');
+        return;
+    }
+
+    showToast('loading', 'Saving playlist settings...', 0);
+    try {
+        const response = await fetch(`/api/playlists/${playlistId}/settings`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                playlist_length: playlistLength,
+                refresh_frequency: refreshFrequency,
+            }),
+        });
+        const data = await response.json().catch(() => ({}));
+        hideToast(currentToast);
+        if (!response.ok) {
+            throw new Error(data.detail || 'Failed to save playlist settings');
+        }
+        showToast('success', 'Playlist settings saved');
+        loadPlaylists({ preserveOpenDetails: true });
+    } catch (error) {
+        hideToast(currentToast);
+        console.error('Failed to save playlist settings:', error);
+        showToast('error', error.message);
+    }
+}
+
+async function refreshPlaylistNow(playlistId) {
+    showToast('loading', 'Updating playlist now...', 0);
+    try {
+        const response = await fetch(`/api/playlists/${playlistId}/refresh`, {
+            method: 'POST',
+        });
+        const data = await response.json().catch(() => ({}));
+        hideToast(currentToast);
+        if (!response.ok) {
+            throw new Error(data.detail || 'Failed to update playlist');
+        }
+        showToast('success', 'Playlist updated');
+        loadPlaylists({ preserveOpenDetails: true });
+    } catch (error) {
+        hideToast(currentToast);
+        console.error('Failed to update playlist:', error);
+        showToast('error', error.message);
+    }
+}
+
+function showBulkLidarrModal(playlistId) {
+    pendingBulkLidarrPlaylistId = playlistId;
+    const modal = document.getElementById('lidarr-bulk-modal');
+    if (!modal) {
+        submitBulkLidarrAdd();
+        return;
+    }
+    modal.classList.remove('hidden');
+    modal.setAttribute('aria-hidden', 'false');
+}
+
+function hideBulkLidarrModal() {
+    const modal = document.getElementById('lidarr-bulk-modal');
+    if (modal) {
+        modal.classList.add('hidden');
+        modal.setAttribute('aria-hidden', 'true');
+    }
+    pendingBulkLidarrPlaylistId = null;
+}
+
+async function submitBulkLidarrAdd() {
+    if (!pendingBulkLidarrPlaylistId) {
+        return;
+    }
+
+    const playlistId = pendingBulkLidarrPlaylistId;
+    const payload = {
+        search: Boolean(document.getElementById('bulk-lidarr-search')?.checked ?? true),
+        monitor_only_target_album: Boolean(document.getElementById('bulk-lidarr-target-only')?.checked ?? true),
+        skip_ambiguous: Boolean(document.getElementById('bulk-lidarr-skip-ambiguous')?.checked ?? true),
+        prefer_album: Boolean(document.getElementById('bulk-lidarr-prefer-album')?.checked ?? true),
+    };
+
+    hideBulkLidarrModal();
+    showToast('loading', 'Adding missing recommendations to Lidarr...', 0);
+    try {
+        const response = await fetch(`/api/playlists/${playlistId}/missing/lidarr/bulk`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const data = await response.json().catch(() => ({}));
+        hideToast(currentToast);
+        if (!response.ok) {
+            throw new Error(data.detail || 'Failed to add missing recommendations to Lidarr');
+        }
+        const counts = data.counts || {};
+        showToast(
+            'success',
+            `Lidarr updated: ${counts.added || 0} added/monitored, ${counts.already_exists || 0} already existed, ${counts.skipped || 0} skipped`
+        );
+        loadPlaylists({ preserveOpenDetails: true });
+    } catch (error) {
+        hideToast(currentToast);
+        console.error('Bulk Lidarr add failed:', error);
+        showToast('error', error.message);
+    }
+}
+
+function getPlaylistTypeLabel(playlist) {
+    const type = playlist.playlist_type;
+    if (type === 'genre_mix') return 'Genre Mix';
+    if (type === 'this_is') return 'This Is';
+    if (type === 'rediscover' || type === 'rediscover_weekly_v2') return 'Re-Discover';
+    if ((playlist.playlist_name || '').startsWith('Genre Mix:')) return 'Genre Mix';
+    if (playlist.artist_id === 'rediscover' || playlist.artist_id === 'rediscover_v2') return 'Re-Discover';
+    return 'This Is';
+}
+
+function getLidarrSummary(playlist) {
     const missing = playlist.recommended_missing || [];
-    if (!missing.length) return '';
+    if (!missing.length) return 'None';
+    const completed = missing.filter(track => {
+        const status = track.lidarr?.status;
+        return ['added_artist', 'added_album', 'monitored_album', 'already_exists'].includes(status);
+    }).length;
+    return `${completed}/${missing.length}`;
+}
 
-    const items = missing.map((track, index) => {
-        const album = track.album ? ` — <span class="text-gray-500">${escapeHtml(track.album)}</span>` : '';
-        const note = track.note ? `<p class="text-xs text-gray-500 mt-0.5 mb-0">${escapeHtml(track.note)}</p>` : '';
-        const badge = renderLidarrBadge(track);
-        const actions = renderLidarrActions(playlist.id, index, track);
-        return `
-            <li class="text-sm text-gray-700 list-none ml-0 pl-0">
-                <span class="font-medium">${escapeHtml(track.title)}</span> by ${escapeHtml(track.artist)}${album}${badge}
-                ${note}
-                ${actions}
-            </li>
-        `;
+function renderRefreshFrequencyOptions(current) {
+    const value = current || 'none';
+    return ['none', 'daily', 'weekly', 'monthly'].map(option => {
+        const label = option === 'none' ? 'Manual' : option.charAt(0).toUpperCase() + option.slice(1);
+        return `<option value="${option}" ${value === option ? 'selected' : ''}>${label}</option>`;
     }).join('');
+}
 
-    const detailsId = `missing-details-${playlist.id}`;
+function renderMissingSuggestionRows(playlist) {
+    const missing = playlist.recommended_missing || [];
+    if (!missing.length) {
+        return '<p class="text-sm text-gray-500 mb-0">No missing recommendations for this playlist.</p>';
+    }
+
     return `
-        <details id="${detailsId}" data-missing-details class="mt-3 border border-amber-200 rounded-lg bg-amber-50/50">
-            <summary class="cursor-pointer text-sm font-medium text-amber-900 px-3 py-2">
-                Recommended but not in library (${missing.length})
-            </summary>
-            <ul class="px-3 pb-3 space-y-3 list-none" id="missing-${playlist.id}">
-                ${items}
-            </ul>
-        </details>
+        <div class="border border-gray-200 rounded-lg overflow-hidden">
+            <table class="min-w-full text-sm">
+                <thead class="bg-gray-50 text-xs uppercase text-gray-500">
+                    <tr>
+                        <th class="text-left px-3 py-2">Track</th>
+                        <th class="text-left px-3 py-2">Artist</th>
+                        <th class="text-left px-3 py-2">Album</th>
+                        <th class="text-left px-3 py-2">Lidarr</th>
+                        <th class="text-left px-3 py-2">Actions</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-gray-100">
+                    ${missing.map((track, index) => `
+                        <tr>
+                            <td class="px-3 py-2">
+                                <span class="font-medium text-gray-900">${escapeHtml(track.title)}</span>
+                                ${track.note ? `<p class="text-xs text-gray-500 mt-1 mb-0">${escapeHtml(track.note)}</p>` : ''}
+                            </td>
+                            <td class="px-3 py-2">${escapeHtml(track.artist)}</td>
+                            <td class="px-3 py-2">${track.album ? escapeHtml(track.album) : '<span class="text-gray-400">Unknown</span>'}</td>
+                            <td class="px-3 py-2">${renderLidarrBadge(track) || '<span class="text-xs text-gray-400">Pending</span>'}</td>
+                            <td class="px-3 py-2">${renderLidarrActions(playlist.id, index, track)}</td>
+                        </tr>
+                    `).join('')}
+                </tbody>
+            </table>
+        </div>
+    `;
+}
+
+function renderPlaylistDetailRow(playlist) {
+    const songs = playlist.songs || [];
+    const missing = playlist.recommended_missing || [];
+    const refreshFrequency = playlist.refresh_frequency || 'none';
+    const trackSummary = songs.length
+        ? `${escapeHtml(songs.slice(0, 30).join(', '))}${songs.length > 30 ? '...' : ''}`
+        : 'No tracks stored.';
+    return `
+        <tr class="bg-gray-50">
+            <td colspan="9" class="px-4 py-4">
+                <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                    <section class="lg:col-span-2 bg-white border border-gray-200 rounded-lg p-4">
+                        <div class="flex items-center justify-between gap-3 mb-3">
+                            <h4 class="font-semibold text-gray-900 mb-0">Recommended but not in library (${missing.length})</h4>
+                            <button
+                                type="button"
+                                data-action="lidarr-add-all"
+                                data-playlist-id="${playlist.id}"
+                                class="text-xs font-semibold rounded bg-indigo-600 text-white px-3 py-1.5 hover:bg-indigo-700 disabled:opacity-50"
+                                ${missing.length && lidarrStatus.enabled && lidarrStatus.configured && lidarrStatus.reachable ? '' : 'disabled'}
+                            >
+                                Add all to Lidarr
+                            </button>
+                        </div>
+                        ${renderMissingSuggestionRows(playlist)}
+                    </section>
+                    <section class="bg-white border border-gray-200 rounded-lg p-4">
+                        <h4 class="font-semibold text-gray-900 mb-3">Playlist settings</h4>
+                        <label class="block text-xs font-medium text-gray-600 mb-1" for="playlist-track-count-${playlist.id}">Track count</label>
+                        <input
+                            id="playlist-track-count-${playlist.id}"
+                            type="number"
+                            min="1"
+                            max="500"
+                            value="${playlist.playlist_length || playlist.track_count || 25}"
+                            class="w-full border border-gray-300 rounded px-3 py-2 text-sm mb-3"
+                        >
+                        <label class="block text-xs font-medium text-gray-600 mb-1" for="playlist-refresh-frequency-${playlist.id}">Update rate</label>
+                        <select
+                            id="playlist-refresh-frequency-${playlist.id}"
+                            class="w-full border border-gray-300 rounded px-3 py-2 text-sm mb-4"
+                        >
+                            ${renderRefreshFrequencyOptions(refreshFrequency)}
+                        </select>
+                        <div class="flex flex-wrap gap-2">
+                            <button type="button" data-action="save-playlist-settings" data-playlist-id="${playlist.id}" class="text-sm font-semibold rounded bg-gray-900 text-white px-3 py-2 hover:bg-gray-700">Save settings</button>
+                            <button type="button" data-action="refresh-playlist-now" data-playlist-id="${playlist.id}" class="text-sm font-semibold rounded border border-gray-300 px-3 py-2 hover:bg-gray-100">Update now</button>
+                        </div>
+                    </section>
+                </div>
+                <section class="mt-4 bg-white border border-gray-200 rounded-lg p-4">
+                    <h4 class="font-semibold text-gray-900 mb-2">Details</h4>
+                    ${playlist.reasoning ? `<p class="text-sm text-gray-600 italic">${escapeHtml(playlist.reasoning)}</p>` : '<p class="text-sm text-gray-500">No reasoning stored.</p>'}
+                    <p class="text-xs text-gray-500 mb-2">Current tracks (${songs.length}):</p>
+                    <p class="text-sm text-gray-700 mb-0">${trackSummary}</p>
+                </section>
+            </td>
+        </tr>
     `;
 }
 
@@ -1425,43 +1683,58 @@ function renderPlaylists(playlists) {
     if (noteEl) {
         noteEl.classList.toggle('hidden', !hasMissingFeature);
     }
-    
-    container.innerHTML = playlists.map(playlist => {
+
+    const rows = playlists.map(playlist => {
+        const isExpanded = expandedPlaylistIds.has(playlist.id);
+        const missingCount = (playlist.recommended_missing || []).length;
         const addedBadge = playlist.added_from_suggestions > 0
-            ? `<span class="inline-block text-xs font-medium text-green-800 bg-green-100 rounded px-2 py-0.5 ml-1">+${playlist.added_from_suggestions} from suggestions</span>`
+            ? `<span class="block text-xs text-green-700">+${playlist.added_from_suggestions} from suggestions</span>`
             : '';
         return `
-            <div class="flex items-start justify-between p-4 border border-gray-200 rounded-lg mb-4">
-                <div class="flex-grow">
-                    <h3 class="text-lg font-semibold text-gray-900 mb-1">${escapeHtml(playlist.playlist_name)}</h3>
-                    <div class="text-sm text-gray-600 mb-2 space-y-1">
-                        <p class="mb-0">
-                            ${playlist.track_count || 0} tracks${addedBadge} • 
-                            Refreshes ${playlist.refresh_frequency || 'manually'} • 
-                            ${playlist.next_refresh ? `Next refresh ${formatNextRefresh(playlist.next_refresh)}` : 'No scheduled refresh'}
-                        </p>
-                        <p class="mb-0">
-                            Created ${formatFriendlyDate(playlist.created_at)} • 
-                            ${playlist.last_refreshed ? `Refreshed ${formatFriendlyDate(playlist.last_refreshed)}` : 'Not refreshed yet'}
-                        </p>
-                    </div>
-                    ${playlist.reasoning ? `<p class="text-sm text-gray-600 m-0 mt-2 italic">${escapeHtml(truncateText(playlist.reasoning, 140))}</p>` : ''}
-                    ${renderMissingSuggestions(playlist)}
-                </div>
-                <div class="flex-none">
-                    <button
-                        type="button"
-                        data-action="delete-playlist"
-                        data-playlist-id="${playlist.id}"
-                        data-playlist-name="${escapeAttr(playlist.playlist_name)}"
-                        class="text-sm font-medium underline cursor-pointer border-none bg-transparent text-red-600 hover:text-red-800 px-2 py-1"
-                    >
-                        Delete
-                    </button>
-                </div>
-            </div>
+            <tr class="hover:bg-gray-50 cursor-pointer" data-action="toggle-playlist-details" data-playlist-id="${playlist.id}">
+                <td class="px-4 py-3">
+                    <div class="font-semibold text-gray-900">${escapeHtml(playlist.playlist_name)}</div>
+                    ${addedBadge}
+                </td>
+                <td class="px-4 py-3 text-sm text-gray-700">${getPlaylistTypeLabel(playlist)}</td>
+                <td class="px-4 py-3 text-sm text-gray-700">${playlist.track_count || 0}</td>
+                <td class="px-4 py-3 text-sm text-gray-700">${missingCount}</td>
+                <td class="px-4 py-3 text-sm text-gray-700">${getLidarrSummary(playlist)}</td>
+                <td class="px-4 py-3 text-sm text-gray-700">${playlist.refresh_frequency || 'manual'}</td>
+                <td class="px-4 py-3 text-sm text-gray-700">${playlist.next_refresh ? formatNextRefresh(playlist.next_refresh) : 'None'}</td>
+                <td class="px-4 py-3 text-sm text-gray-700">${playlist.last_refreshed ? formatFriendlyDate(playlist.last_refreshed) : 'Never'}</td>
+                <td class="px-4 py-3 text-right">
+                    <button type="button" data-action="refresh-playlist-now" data-playlist-id="${playlist.id}" class="text-xs font-medium text-indigo-700 hover:text-indigo-900 underline mr-2">Update now</button>
+                    <button type="button" data-action="delete-playlist" data-playlist-id="${playlist.id}" data-playlist-name="${escapeAttr(playlist.playlist_name)}" class="text-xs font-medium text-red-600 hover:text-red-800 underline">Delete</button>
+                    <span class="inline-block ml-2 text-gray-400">${isExpanded ? '▲' : '▼'}</span>
+                </td>
+            </tr>
+            ${isExpanded ? renderPlaylistDetailRow(playlist) : ''}
         `;
     }).join('');
+
+    container.innerHTML = `
+        <div class="overflow-x-auto border border-gray-200 rounded-lg">
+            <table class="min-w-full divide-y divide-gray-200 bg-white">
+                <thead class="bg-gray-50 text-xs uppercase text-gray-500">
+                    <tr>
+                        <th class="text-left px-4 py-3">Playlist</th>
+                        <th class="text-left px-4 py-3">Type</th>
+                        <th class="text-left px-4 py-3">Tracks</th>
+                        <th class="text-left px-4 py-3">Missing</th>
+                        <th class="text-left px-4 py-3">Lidarr</th>
+                        <th class="text-left px-4 py-3">Rate</th>
+                        <th class="text-left px-4 py-3">Next</th>
+                        <th class="text-left px-4 py-3">Last</th>
+                        <th class="text-right px-4 py-3">Actions</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-gray-100">
+                    ${rows}
+                </tbody>
+            </table>
+        </div>
+    `;
 }
 
 async function deletePlaylist(playlistId, playlistName) {

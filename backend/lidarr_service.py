@@ -214,6 +214,205 @@ class LidarrService:
             foreign_artist_id=foreign_artist_id,
         )
 
+    async def add_missing_items_bulk(
+        self,
+        suggestions: List[Dict[str, Any]],
+        search: bool = True,
+        monitor_only_target_album: bool = True,
+        skip_ambiguous: bool = True,
+        prefer_album: bool = True,
+    ) -> Dict[str, Any]:
+        """Add multiple missing recommendations to Lidarr with per-item results."""
+        results = []
+        counts = {
+            "added": 0,
+            "already_exists": 0,
+            "ambiguous": 0,
+            "not_found": 0,
+            "failed": 0,
+            "skipped": 0,
+        }
+
+        for index, suggestion in enumerate(suggestions):
+            try:
+                if prefer_album and suggestion.get("album"):
+                    result = await self._add_album_targeted_flow(
+                        suggestion,
+                        search=search,
+                        monitor_only_target_album=monitor_only_target_album,
+                        skip_ambiguous=skip_ambiguous,
+                    )
+                else:
+                    result = await self.add_missing_item(suggestion, mode="artist")
+
+                result["index"] = index
+                status = result.get("status", "failed")
+                if status in ("added_album", "added_artist", "monitored_album"):
+                    counts["added"] += 1
+                elif status == "already_exists":
+                    counts["already_exists"] += 1
+                elif status == "ambiguous":
+                    counts["ambiguous"] += 1
+                elif status == "not_found":
+                    counts["not_found"] += 1
+                elif status == "skipped":
+                    counts["skipped"] += 1
+                else:
+                    counts["failed"] += 1
+                results.append(result)
+            except Exception as exc:
+                counts["failed"] += 1
+                results.append({
+                    "index": index,
+                    "status": "error",
+                    "message": str(exc),
+                    "mode": "album" if suggestion.get("album") else "artist",
+                })
+
+        return {
+            "status": "completed",
+            "counts": counts,
+            "results": results,
+        }
+
+    async def _add_album_targeted_flow(
+        self,
+        suggestion: Dict[str, Any],
+        search: bool,
+        monitor_only_target_album: bool,
+        skip_ambiguous: bool,
+    ) -> Dict[str, Any]:
+        """Add or monitor only the album that contains the missing recommendation."""
+        client = self._get_client()
+        root_folder, quality_id, metadata_id = await self._resolve_defaults(client)
+        existing_artists = await client.list_artists()
+        existing_by_foreign = {
+            item.get("foreignArtistId"): item
+            for item in existing_artists
+            if item.get("foreignArtistId")
+        }
+
+        album_title = suggestion.get("album", "").strip()
+        artist_name = suggestion.get("artist", "")
+        candidate, status, candidates = await self._resolve_album_candidate(
+            client,
+            album_title,
+            artist_name,
+            suggestion,
+        )
+
+        if status == "ambiguous":
+            return {
+                "status": "skipped" if skip_ambiguous else "ambiguous",
+                "mode": "album",
+                "message": "Ambiguous Lidarr album match",
+                "candidates": candidates,
+            }
+        if status == "not_found" or not candidate:
+            return {
+                "status": "not_found",
+                "mode": "album",
+                "message": f"No Lidarr album match for {album_title} by {artist_name}",
+            }
+
+        artist = dict(candidate.get("artist") or {})
+        foreign_artist = artist.get("foreignArtistId")
+        foreign_album = candidate.get("foreignAlbumId")
+        existing_artist = existing_by_foreign.get(foreign_artist)
+
+        if not existing_artist:
+            artist.update({
+                "rootFolderPath": root_folder,
+                "qualityProfileId": quality_id,
+                "metadataProfileId": metadata_id,
+                "monitored": True,
+                "addOptions": {
+                    "monitor": "none" if monitor_only_target_album else "all",
+                    "searchForMissingAlbums": False,
+                },
+            })
+            payload = dict(candidate)
+            payload["artist"] = artist
+            payload["monitored"] = True
+            payload["addOptions"] = {"searchForNewAlbum": search}
+            added = await client.add_album(payload)
+
+            # Refresh artist data after add so we can enforce album monitoring state.
+            existing_artists = await client.list_artists()
+            existing_artist = next(
+                (item for item in existing_artists if item.get("foreignArtistId") == foreign_artist),
+                None,
+            )
+            target_album_id = added.get("id")
+            status_value = "added_album"
+        else:
+            target_album_id = None
+            status_value = "monitored_album"
+
+        monitored_album = None
+        if existing_artist and existing_artist.get("id"):
+            monitored_album = await self._monitor_target_album(
+                client,
+                int(existing_artist["id"]),
+                foreign_album,
+                monitor_only_target_album=monitor_only_target_album,
+                search=search,
+            )
+            if monitored_album:
+                target_album_id = monitored_album.get("id")
+            else:
+                payload = dict(candidate)
+                payload["artist"] = existing_artist
+                payload["monitored"] = True
+                payload["addOptions"] = {"searchForNewAlbum": search}
+                added = await client.add_album(payload)
+                target_album_id = added.get("id")
+                monitored_album = await self._monitor_target_album(
+                    client,
+                    int(existing_artist["id"]),
+                    foreign_album,
+                    monitor_only_target_album=monitor_only_target_album,
+                    search=False,
+                )
+                if monitored_album:
+                    target_album_id = monitored_album.get("id")
+
+        return {
+            "status": status_value,
+            "mode": "album",
+            "foreign_artist_id": foreign_artist,
+            "foreign_album_id": foreign_album,
+            "album_title": candidate.get("title"),
+            "artist_name": artist.get("artistName") or (existing_artist or {}).get("artistName"),
+            "lidarr_artist_id": (existing_artist or {}).get("id"),
+            "lidarr_album_id": target_album_id,
+            "added_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    async def _monitor_target_album(
+        self,
+        client: LidarrClient,
+        artist_id: int,
+        foreign_album_id: str,
+        monitor_only_target_album: bool,
+        search: bool,
+    ) -> Optional[Dict[str, Any]]:
+        albums = await client.get_albums_by_artist(artist_id)
+        target_album = None
+        for album in albums:
+            is_target = album.get("foreignAlbumId") == foreign_album_id
+            if is_target:
+                target_album = album
+            desired_monitored = is_target or (album.get("monitored") and not monitor_only_target_album)
+            if album.get("monitored") != desired_monitored:
+                updated_album = dict(album)
+                updated_album["monitored"] = desired_monitored
+                await client.update_album(updated_album)
+
+        if target_album and search:
+            await client.search_album(int(target_album["id"]))
+        return target_album
+
     async def _add_artist_flow(
         self,
         client: LidarrClient,

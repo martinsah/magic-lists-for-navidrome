@@ -16,6 +16,9 @@ class CreatePlaylistRequest(BaseModel):
     refresh_frequency: str = "none"  # "none", "daily", "weekly", "monthly"
     playlist_length: int = 25  # Number of tracks to include
     library_ids: List[str] = []  # List of library IDs to filter tracks
+    artist_concentration: float = 0.8  # 0=diverse, 1=allow seed artist dominance
+    album_concentration: float = 0.35
+    llm_polish: bool = True
 
 class CreateGenrePlaylistRequest(BaseModel):
     """Request schema for creating a genre mix playlist"""
@@ -24,6 +27,9 @@ class CreateGenrePlaylistRequest(BaseModel):
     refresh_frequency: str = "none"  # "none", "daily", "weekly", "monthly"
     playlist_length: int = 25  # Number of tracks to include
     library_ids: List[str] = []  # List of library IDs to filter tracks
+    artist_concentration: float = 0.35  # 0=more artists, 1=allow repeats
+    album_concentration: float = 0.25
+    llm_polish: bool = True
 
 class SuggestedMissingTrack(BaseModel):
     """A track suggested by AI that is not in the library"""
@@ -42,6 +48,20 @@ class LidarrAddRequest(BaseModel):
     foreign_album_id: Optional[str] = None
 
 
+class LidarrBulkAddRequest(BaseModel):
+    """Request to add all missing recommendations to Lidarr"""
+    search: bool = True
+    monitor_only_target_album: bool = True
+    skip_ambiguous: bool = True
+    prefer_album: bool = True
+
+
+class PlaylistSettingsRequest(BaseModel):
+    """Editable playlist settings from Manage Playlists"""
+    playlist_length: int
+    refresh_frequency: str = "none"
+
+
 class Playlist(BaseModel):
     """Schema for a stored playlist"""
     id: int
@@ -51,6 +71,7 @@ class Playlist(BaseModel):
     reasoning: Optional[str] = None
     navidrome_playlist_id: Optional[str] = None
     library_ids: List[str] = []
+    curation_options: Dict[str, Any] = {}
     recommended_missing: List[SuggestedMissingTrack] = []
     added_from_suggestions: int = 0
     created_at: str

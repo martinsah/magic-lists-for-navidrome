@@ -1,7 +1,7 @@
 import sqlite3
 import aiosqlite
 import os
-from typing import List, Optional, Dict
+from typing import Any, List, Optional, Dict
 from datetime import datetime
 import json
 
@@ -67,6 +67,7 @@ class DatabaseManager:
             for column_sql in (
                 "ALTER TABLE playlists ADD COLUMN recommended_missing TEXT",
                 "ALTER TABLE playlists ADD COLUMN added_from_suggestions INTEGER DEFAULT 0",
+                "ALTER TABLE playlists ADD COLUMN curation_options TEXT",
             ):
                 try:
                     await db.execute(column_sql)
@@ -164,20 +165,82 @@ class DatabaseManager:
                 CREATE INDEX IF NOT EXISTS idx_api_cache_expires ON api_cache(expires_at)
             """)
 
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS library_sources (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_key TEXT NOT NULL UNIQUE,
+                    server_type TEXT NOT NULL DEFAULT 'navidrome',
+                    last_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS track_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_id INTEGER NOT NULL,
+                    navidrome_track_id TEXT NOT NULL,
+                    stable_key TEXT NOT NULL,
+                    title TEXT,
+                    artist TEXT,
+                    album TEXT,
+                    duration INTEGER,
+                    genres_json TEXT,
+                    play_count INTEGER DEFAULT 0,
+                    rating INTEGER DEFAULT 0,
+                    starred INTEGER DEFAULT 0,
+                    first_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    raw_json TEXT,
+                    UNIQUE(source_id, navidrome_track_id),
+                    FOREIGN KEY(source_id) REFERENCES library_sources(id)
+                )
+            """)
+
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS score_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_id INTEGER NOT NULL,
+                    recipe_id TEXT NOT NULL,
+                    scoring_version TEXT NOT NULL,
+                    params_json TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(source_id) REFERENCES library_sources(id)
+                )
+            """)
+
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS track_scores (
+                    score_run_id INTEGER NOT NULL,
+                    track_snapshot_id INTEGER NOT NULL,
+                    score REAL NOT NULL,
+                    components_json TEXT,
+                    rank INTEGER,
+                    PRIMARY KEY(score_run_id, track_snapshot_id),
+                    FOREIGN KEY(score_run_id) REFERENCES score_runs(id),
+                    FOREIGN KEY(track_snapshot_id) REFERENCES track_snapshots(id)
+                )
+            """)
+
+            await db.execute("""
+                CREATE INDEX IF NOT EXISTS idx_track_snapshots_stable_key
+                ON track_snapshots(stable_key)
+            """)
+
             await db.commit()
     
-    async def create_playlist(self, artist_id: str, playlist_name: str, songs: Optional[List[str]] = None, reasoning: Optional[str] = None, navidrome_playlist_id: Optional[str] = None, playlist_length: Optional[int] = None, library_ids: Optional[List[str]] = None) -> Optional[Playlist]:
+    async def create_playlist(self, artist_id: str, playlist_name: str, songs: Optional[List[str]] = None, reasoning: Optional[str] = None, navidrome_playlist_id: Optional[str] = None, playlist_length: Optional[int] = None, library_ids: Optional[List[str]] = None, curation_options: Optional[Dict[str, Any]] = None) -> Optional[Playlist]:
         """Create a new playlist in the database"""
         await self.init_db()
         
         songs_json = json.dumps(songs or [])
         library_ids_json = json.dumps(library_ids or [])
+        curation_options_json = json.dumps(curation_options or {})
 
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute("""
-                INSERT INTO playlists (artist_id, playlist_name, songs, reasoning, navidrome_playlist_id, playlist_length, library_ids)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (artist_id, playlist_name, songs_json, reasoning, navidrome_playlist_id, playlist_length, library_ids_json))
+                INSERT INTO playlists (artist_id, playlist_name, songs, reasoning, navidrome_playlist_id, playlist_length, library_ids, curation_options)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (artist_id, playlist_name, songs_json, reasoning, navidrome_playlist_id, playlist_length, library_ids_json, curation_options_json))
             
             playlist_id = cursor.lastrowid
             await db.commit()
@@ -275,6 +338,8 @@ class DatabaseManager:
                     p.recommended_missing,
                     p.added_from_suggestions,
                     p.library_ids,
+                    p.curation_options,
+                    sp.id,
                     sp.refresh_frequency,
                     sp.next_refresh,
                     sp.playlist_type
@@ -299,9 +364,11 @@ class DatabaseManager:
                         "recommended_missing": json.loads(row[10]) if row[10] else [],
                         "added_from_suggestions": row[11] or 0,
                         "library_ids": json.loads(row[12]) if row[12] else [],
-                        "refresh_frequency": row[13],
-                        "next_refresh": row[14],
-                        "playlist_type": row[15],
+                        "curation_options": json.loads(row[13]) if row[13] else {},
+                        "schedule_id": row[14],
+                        "refresh_frequency": row[15],
+                        "next_refresh": row[16],
+                        "playlist_type": row[17],
                     }
                     playlists.append(playlist_data)
         
@@ -319,9 +386,15 @@ class DatabaseManager:
                     p.playlist_name, 
                     p.songs, 
                     p.reasoning,
+                    p.playlist_length,
+                    p.library_ids,
+                    p.recommended_missing,
+                    p.added_from_suggestions,
+                    p.curation_options,
                     p.created_at, 
                     p.updated_at,
                     p.navidrome_playlist_id,
+                    sp.id,
                     sp.refresh_frequency,
                     sp.next_refresh,
                     sp.playlist_type
@@ -338,15 +411,78 @@ class DatabaseManager:
                         "playlist_name": row[2],
                         "songs": json.loads(row[3]),
                         "reasoning": row[4],
-                        "created_at": row[5],
-                        "updated_at": row[6],
-                        "navidrome_playlist_id": row[7],
-                        "refresh_frequency": row[8],
-                        "next_refresh": row[9],
-                        "playlist_type": row[10]
+                        "playlist_length": row[5],
+                        "library_ids": json.loads(row[6]) if row[6] else [],
+                        "recommended_missing": json.loads(row[7]) if row[7] else [],
+                        "added_from_suggestions": row[8] or 0,
+                        "curation_options": json.loads(row[9]) if row[9] else {},
+                        "created_at": row[10],
+                        "updated_at": row[11],
+                        "navidrome_playlist_id": row[12],
+                        "schedule_id": row[13],
+                        "refresh_frequency": row[14],
+                        "next_refresh": row[15],
+                        "playlist_type": row[16]
                     }
         
         return None
+
+    async def update_playlist_settings(self, playlist_id: int, playlist_length: int) -> bool:
+        """Update editable playlist settings stored on the playlist row."""
+        await self.init_db()
+
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute("""
+                UPDATE playlists
+                SET playlist_length = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            """, (playlist_length, playlist_id))
+            await db.commit()
+            return cursor.rowcount > 0
+
+    async def upsert_scheduled_playlist(
+        self,
+        playlist_type: str,
+        navidrome_playlist_id: str,
+        refresh_frequency: str,
+        next_refresh: datetime,
+    ) -> bool:
+        """Create or update a scheduled playlist by Navidrome playlist ID."""
+        await self.init_db()
+
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute("""
+                UPDATE scheduled_playlists
+                SET playlist_type = ?,
+                    refresh_frequency = ?,
+                    next_refresh = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE navidrome_playlist_id = ?
+            """, (
+                playlist_type,
+                refresh_frequency,
+                next_refresh.isoformat(),
+                navidrome_playlist_id,
+            ))
+
+            if cursor.rowcount == 0:
+                await db.execute("""
+                    INSERT INTO scheduled_playlists (
+                        playlist_type,
+                        navidrome_playlist_id,
+                        refresh_frequency,
+                        next_refresh
+                    )
+                    VALUES (?, ?, ?, ?)
+                """, (
+                    playlist_type,
+                    navidrome_playlist_id,
+                    refresh_frequency,
+                    next_refresh.isoformat(),
+                ))
+
+            await db.commit()
+            return True
     
     async def delete_playlist(self, playlist_id: int) -> bool:
         """Delete a playlist from the database"""
@@ -647,6 +783,126 @@ class DatabaseManager:
             
             await db.commit()
             return True
+
+    async def record_scoring_run(
+        self,
+        source_key: str,
+        recipe_id: str,
+        scoring_version: str,
+        params: Dict[str, Any],
+        scored_tracks: List[Dict[str, Any]],
+    ) -> Optional[int]:
+        """Persist derived metadata and score components for a curation run."""
+        await self.init_db()
+
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("""
+                INSERT INTO library_sources (source_key, server_type, last_seen_at)
+                VALUES (?, 'navidrome', CURRENT_TIMESTAMP)
+                ON CONFLICT(source_key) DO UPDATE SET last_seen_at = CURRENT_TIMESTAMP
+            """, (source_key,))
+
+            async with db.execute(
+                "SELECT id FROM library_sources WHERE source_key = ?",
+                (source_key,),
+            ) as source_cursor:
+                source_row = await source_cursor.fetchone()
+                if not source_row:
+                    return None
+                source_id = source_row[0]
+
+            run_cursor = await db.execute("""
+                INSERT INTO score_runs (
+                    source_id,
+                    recipe_id,
+                    scoring_version,
+                    params_json
+                )
+                VALUES (?, ?, ?, ?)
+            """, (
+                source_id,
+                recipe_id,
+                scoring_version,
+                json.dumps(params, sort_keys=True),
+            ))
+            score_run_id = run_cursor.lastrowid
+
+            for rank, track in enumerate(scored_tracks, start=1):
+                navidrome_track_id = str(track.get("id") or "")
+                if not navidrome_track_id:
+                    continue
+                stable_key = track.get("_stable_key") or navidrome_track_id
+                await db.execute("""
+                    INSERT INTO track_snapshots (
+                        source_id,
+                        navidrome_track_id,
+                        stable_key,
+                        title,
+                        artist,
+                        album,
+                        duration,
+                        genres_json,
+                        play_count,
+                        rating,
+                        starred,
+                        raw_json
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(source_id, navidrome_track_id) DO UPDATE SET
+                        stable_key = excluded.stable_key,
+                        title = excluded.title,
+                        artist = excluded.artist,
+                        album = excluded.album,
+                        duration = excluded.duration,
+                        genres_json = excluded.genres_json,
+                        play_count = excluded.play_count,
+                        rating = excluded.rating,
+                        starred = excluded.starred,
+                        last_seen_at = CURRENT_TIMESTAMP,
+                        raw_json = excluded.raw_json
+                """, (
+                    source_id,
+                    navidrome_track_id,
+                    stable_key,
+                    track.get("title"),
+                    track.get("artist"),
+                    track.get("album"),
+                    track.get("duration"),
+                    json.dumps(track.get("genres") or ([track.get("genre")] if track.get("genre") else [])),
+                    int(track.get("play_count") or 0),
+                    int(track.get("rating") or 0),
+                    1 if track.get("local_library_likes") or track.get("starred") else 0,
+                    json.dumps({k: v for k, v in track.items() if not k.startswith("_")}, sort_keys=True),
+                ))
+
+                async with db.execute("""
+                    SELECT id FROM track_snapshots
+                    WHERE source_id = ? AND navidrome_track_id = ?
+                """, (source_id, navidrome_track_id)) as snapshot_cursor:
+                    snapshot_row = await snapshot_cursor.fetchone()
+                    if not snapshot_row:
+                        continue
+                    snapshot_id = snapshot_row[0]
+
+                await db.execute("""
+                    INSERT OR REPLACE INTO track_scores (
+                        score_run_id,
+                        track_snapshot_id,
+                        score,
+                        components_json,
+                        rank
+                    )
+                    VALUES (?, ?, ?, ?, ?)
+                """, (
+                    score_run_id,
+                    snapshot_id,
+                    float(track.get("_score") or 0),
+                    json.dumps(track.get("_score_components") or {}, sort_keys=True),
+                    rank,
+                ))
+
+            await db.commit()
+            return score_run_id
 
     async def get_user_preference(self, user_id: str, key: str) -> Optional[str]:
         """Get a user preference value"""

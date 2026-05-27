@@ -355,14 +355,6 @@
                         </div>
                     </div>
 
-                    <h2 class="text-xl font-semibold text-gray-900 mt-7 mb-2">Privacy & control</h2>
-                    <p class="text-gray-600 mb-4">Your music and metadata remain yours. No music files are uploaded — you choose whether AI runs locally or via a remote API key.</p>
-
-                    <h2 class="text-xl font-semibold text-gray-900 mt-7 mb-2">About this project</h2>
-                    <p class="text-gray-600 mb-4">MagicLists is an open-source experiment in AI-assisted music discovery for people who run their own Navidrome server. Instead of "renting" playlists from Apple or Spotify, you keep full control of your library and still enjoy smart, personalised mixes.</p>
-                    <p class="text-gray-600 mb-4">This is an ongoing research project led by a product designer with 20+ years in tech, built with and for the Navidrome community. Together we're proving that AI-powered curation can be free, transparent and privacy-respecting.</p>
-
-                    
                     <h3 class="text-base font-semibold text-gray-500 mt-5 mb-2">Available Today</h3>
                     <ul class="list-disc list-outside ml-5 space-y-1 text-gray-600 mb-2">
                         <li>This Is: Create a curated mix for any artist.</li>
@@ -375,10 +367,6 @@
                         <li>Fresh discovery tools</li>
                         <li>Library embeddings for richer, similarity-based mixes</li>
                     </ul>
-
-                    <h2 class="text-xl font-semibold text-gray-900 mt-7 mb-2">Get in Touch</h2>
-                    <p class="text-gray-600">Questions or feedback? Reach out at <a href="mailto:magiclists@synnotstudio.com" class="text-indigo-600 hover:text-indigo-800 transition-color border-b border-indigo-200 ">magiclists@synnotstudio.com</a></p>
-                   
                 </div>
 
                 <!-- This Is Artist Content (hidden by default) -->
@@ -636,6 +624,35 @@
                                     </div>
                                 </div>
                             </div>
+                            <div>
+                                <label for="genre-artist-concentration" class="block text-sm text-gray-900 font-bold mb-2">Artist Repeat Allowance</label>
+                                <input
+                                    id="genre-artist-concentration"
+                                    type="range"
+                                    min="0"
+                                    max="1"
+                                    step="0.05"
+                                    value="0.35"
+                                    class="w-full accent-blue-600"
+                                >
+                                <p class="text-xs text-gray-500 mt-1">Lower values spread tracks across more artists. Higher values allow more repeats from the same artist.</p>
+                            </div>
+                            <div>
+                                <label for="genre-album-concentration" class="block text-sm text-gray-900 font-bold mb-2">Album Repeat Allowance</label>
+                                <input
+                                    id="genre-album-concentration"
+                                    type="range"
+                                    min="0"
+                                    max="1"
+                                    step="0.05"
+                                    value="0.25"
+                                    class="w-full accent-blue-600"
+                                >
+                                <label class="flex items-center gap-2 text-sm text-gray-600 mt-3">
+                                    <input id="genre-llm-polish" type="checkbox" checked class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                                    Let the LLM polish ordering and make small swaps
+                                </label>
+                            </div>
                         </div>
                         <!-- Submit Button -->
                         <div class="pt-4">
@@ -835,6 +852,41 @@
             <div id="lidarr-disambiguation-list" class="space-y-2 max-h-72 overflow-y-auto"></div>
         </div>
     </div>
-    <script src="/static/app.js?v=1.0.3"></script>
+
+    <!-- Bulk Lidarr options modal -->
+    <div id="lidarr-bulk-modal" class="hidden fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/40" aria-hidden="true" role="dialog" aria-labelledby="lidarr-bulk-title">
+        <div class="bg-white rounded-lg shadow-xl max-w-lg w-full p-5">
+            <div class="flex items-start justify-between mb-4">
+                <h2 id="lidarr-bulk-title" class="text-lg font-semibold text-gray-900">Add all missing recommendations to Lidarr</h2>
+                <button type="button" id="lidarr-bulk-close" class="text-gray-500 hover:text-gray-700 text-xl leading-none" aria-label="Close">&times;</button>
+            </div>
+            <p class="text-sm text-gray-600 mb-4">
+                By default MagicLists will add the artist, monitor only the album containing the recommended track, and trigger a Lidarr search.
+            </p>
+            <div class="space-y-3 text-sm text-gray-700">
+                <label class="flex items-start gap-2">
+                    <input id="bulk-lidarr-prefer-album" type="checkbox" checked class="mt-1">
+                    <span>Prefer album adds when album metadata is available</span>
+                </label>
+                <label class="flex items-start gap-2">
+                    <input id="bulk-lidarr-target-only" type="checkbox" checked class="mt-1">
+                    <span>Monitor only the target album and unmonitor other albums for that artist</span>
+                </label>
+                <label class="flex items-start gap-2">
+                    <input id="bulk-lidarr-search" type="checkbox" checked class="mt-1">
+                    <span>Search Lidarr after adding or monitoring the target album</span>
+                </label>
+                <label class="flex items-start gap-2">
+                    <input id="bulk-lidarr-skip-ambiguous" type="checkbox" checked class="mt-1">
+                    <span>Skip ambiguous matches instead of adding them automatically</span>
+                </label>
+            </div>
+            <div class="flex justify-end gap-2 mt-5">
+                <button type="button" id="lidarr-bulk-cancel" class="text-sm font-semibold rounded border border-gray-300 px-3 py-2 hover:bg-gray-100">Cancel</button>
+                <button type="button" id="lidarr-bulk-submit" class="text-sm font-semibold rounded bg-indigo-600 text-white px-3 py-2 hover:bg-indigo-700">Add all</button>
+            </div>
+        </div>
+    </div>
+    <script src="/static/app.js?v=1.0.6"></script>
 </body>
 </html>
