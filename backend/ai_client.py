@@ -5,6 +5,10 @@ from typing import List, Dict, Any, Union, Tuple, Optional
 from .recipe_manager import recipe_manager
 from .services.ai_providers import get_ai_provider
 from .curation_helpers import finish_curation, parse_ai_curation_response
+from .services.llm_logging import log_curation_parse_result
+import logging
+
+llm_logger = logging.getLogger("llm")
 from .suggestion_service import (
     extract_suggested_tracks_from_partial_text,
     missing_recommendations_enabled,
@@ -208,6 +212,7 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}{suggestion_promp
                     temperature=temperature,
                     json_response=use_structured_json,
                     include_suggestions=use_structured_json,
+                    call_label="this_is",
                 )
             else:
                 # Legacy recipe format
@@ -218,14 +223,13 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}{suggestion_promp
                     temperature=temperature,
                     json_response=use_structured_json,
                     include_suggestions=use_structured_json,
+                    call_label="this_is",
                 )
-
-            # Log the full raw AI response for debugging
-            print(f"🤖 FULL RAW AI RESPONSE for This Is: {content}")
 
             # Parse the JSON response with comprehensive validation
             try:
                 response_data = parse_ai_curation_response(content)
+                log_curation_parse_result("this_is", content, response_data)
 
                 # Validate response structure with index-based approach
                 source_track_count = len(tracks_json)
@@ -305,8 +309,7 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}{suggestion_promp
                     raise ValueError("Invalid response format: expected dict with track_ids or array of track IDs")
 
             except (json.JSONDecodeError, ValueError) as e:
-                print(f"Failed to parse AI response: {e}")
-                print(f"Response content: {content}")
+                llm_logger.error("LLM PARSE FAILED [this_is]: %s", e)
                 return self._fallback_this_is_selection(tracks_json, num_tracks, include_reasoning)
                 
         except httpx.RequestError as e:
@@ -465,6 +468,7 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}{suggestion_promp
                     temperature=temperature,
                     json_response=use_structured_json,
                     include_suggestions=use_structured_json,
+                    call_label="rediscover",
                 )
             else:
                 # Legacy recipe format fallback
@@ -483,11 +487,13 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}{suggestion_promp
                     temperature=temperature,
                     json_response=use_structured_json,
                     include_suggestions=use_structured_json,
+                    call_label="rediscover",
                 )
 
             # Parse the JSON response with comprehensive validation
             try:
                 result = parse_ai_curation_response(content)
+                log_curation_parse_result("rediscover", content, result)
 
                 # Validate response structure with index-based approach
                 if isinstance(result, dict) and "track_ids" in result:
@@ -724,14 +730,13 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}{suggestion_promp
                 temperature=temperature,
                 json_response=True,
                 include_suggestions=use_suggestions,
+                call_label="genre_mix",
             )
-
-            # Log the full raw AI response for debugging
-            print(f"🤖 FULL RAW AI RESPONSE for Genre Mix: {content}")
 
             # Parse the JSON response with comprehensive validation
             try:
                 response_data = parse_ai_curation_response(content)
+                log_curation_parse_result("genre_mix", content, response_data)
 
                 # Validate response structure with index-based approach
                 source_track_count = len(tracks_json)
@@ -813,8 +818,7 @@ Return JSON: {{"track_ids": [indices], "reasoning": "summary"}}{suggestion_promp
                     raise ValueError("Invalid response format: expected dict with track_ids or array of track IDs")
 
             except (json.JSONDecodeError, ValueError) as e:
-                print(f"Failed to parse AI response: {e}")
-                print(f"Response content: {content[:500]}...")
+                llm_logger.error("LLM PARSE FAILED [genre_mix]: %s", e)
                 recovered = self._recover_partial_genre_mix_response(content, track_id_map, num_tracks)
                 if recovered:
                     final_selection, reasoning, suggested = recovered

@@ -1,10 +1,18 @@
 import os
 import asyncio
+import time
 import httpx
 import json
 import re
-from typing import Optional, Dict, Any, Union, NoReturn
+from typing import Optional, Dict, Any, Union, NoReturn, Tuple
 from dataclasses import dataclass
+
+from .llm_logging import (
+    infer_call_label,
+    log_llm_failure,
+    log_llm_request,
+    log_llm_response,
+)
 
 @dataclass
 class ProviderConfig:
@@ -63,102 +71,206 @@ class AIProvider:
         json_response: bool = False,
         include_suggestions: bool = False,
         response_schema: Optional[Dict[str, Any]] = None,
+        call_label: Optional[str] = None,
     ) -> str:
         """Send chat completion request to configured AI provider"""
-        
-        # Handle Google AI's different API format
+        label = call_label or infer_call_label(system_prompt, user_prompt)
         if self.provider_type == "google":
-            return await self._generate_google(
-                system_prompt,
-                user_prompt,
-                max_tokens,
-                temperature,
-                json_response=json_response,
-                include_suggestions=include_suggestions,
-                response_schema=response_schema,
+            max_attempts = int(os.getenv("GOOGLE_AI_MAX_RETRIES", "4"))
+        elif self.provider_type == "ollama":
+            max_attempts = 3
+        else:
+            max_attempts = 1
+
+        log_llm_request(
+            provider=self.provider_type,
+            model=self.model or "",
+            label=label,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            json_response=json_response,
+            include_suggestions=include_suggestions,
+            attempt=1,
+            max_attempts=max_attempts,
+        )
+
+        started = time.perf_counter()
+        self._last_llm_meta: Dict[str, Any] = {}
+
+        try:
+            if self.provider_type == "google":
+                content = await self._generate_google(
+                    system_prompt,
+                    user_prompt,
+                    max_tokens,
+                    temperature,
+                    json_response=json_response,
+                    include_suggestions=include_suggestions,
+                    response_schema=response_schema,
+                    call_label=label,
+                )
+            elif self.provider_type == "ollama":
+                content = await self._generate_ollama(
+                    system_prompt,
+                    user_prompt,
+                    max_tokens,
+                    temperature,
+                    call_label=label,
+                )
+            else:
+                content = await self._generate_openai_compatible(
+                    system_prompt,
+                    user_prompt,
+                    max_tokens,
+                    temperature,
+                )
+
+            duration_ms = (time.perf_counter() - started) * 1000
+            log_llm_response(
+                provider=self.provider_type,
+                model=self.model or "",
+                label=label,
+                content=content,
+                duration_ms=duration_ms,
+                usage=self._last_llm_meta.get("usage"),
+                finish_reason=self._last_llm_meta.get("finish_reason"),
             )
-        
-        # Build headers - only include Authorization for providers that require keys
+            return content
+        except Exception as exc:
+            duration_ms = (time.perf_counter() - started) * 1000
+            log_llm_failure(
+                provider=self.provider_type,
+                model=self.model or "",
+                label=label,
+                error=exc,
+                duration_ms=duration_ms,
+            )
+            raise
+
+    async def _generate_openai_compatible(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int,
+        temperature: float,
+    ) -> str:
         headers = {"Content-Type": "application/json"}
         if self.provider_type in ["openrouter", "groq"] and self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
-        
-        # Build payload - all providers use OpenAI-compatible format
+
         payload = {
             "model": self.model,
             "messages": [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
+                {"role": "user", "content": user_prompt},
             ],
             "max_tokens": max_tokens,
-            "temperature": temperature
+            "temperature": temperature,
         }
-        
-        # Set timeout based on provider type
-        if self.provider_type == "ollama":
-            # Allow user to override Ollama timeout (default 180 seconds)
-            timeout = float(os.getenv("OLLAMA_TIMEOUT", "180"))
-            max_retries = 3
-            retry_delay = 10
-            
-            # Handle Ollama model loading with retry logic
-            for attempt in range(max_retries):
-                try:
-                    response = await self.client.post(
-                        self.base_url,
-                        json=payload,
-                        headers=headers,
-                        timeout=timeout
-                    )
-                    response.raise_for_status()
-                    
-                    result = response.json()
-                    return result["choices"][0]["message"]["content"].strip()
-                    
-                except httpx.HTTPStatusError as e:
-                    if e.response.status_code == 500:
-                        # Check if it's a model loading error
-                        try:
-                            error_data = e.response.json()
-                            error_message = error_data.get("error", {}).get("message", "")
-                            
-                            if "loading model" in error_message.lower():
-                                print(f"🔄 Model still loading (attempt {attempt + 1}/{max_retries}), waiting {retry_delay}s...")
-                                if attempt < max_retries - 1:
-                                    import asyncio
-                                    await asyncio.sleep(retry_delay)
-                                    retry_delay += 10
-                                    continue
-                                else:
-                                    print(f"❌ Model loading timeout after {max_retries} attempts")
-                                    raise Exception(f"Ollama model '{self.model}' is still loading after {max_retries * retry_delay}s. Try again in a few minutes.")
-                            else:
-                                raise
-                        except (json.JSONDecodeError, KeyError):
-                            raise
-                    else:
-                        raise
-                except Exception as e:
-                    if attempt == max_retries - 1:
-                        raise
-                    else:
-                        print(f"🔄 Request failed (attempt {attempt + 1}/{max_retries}): {str(e)}")
-                        import asyncio
-                        await asyncio.sleep(retry_delay)
-                        continue
-        else:
-            # OpenRouter and Groq - single attempt with standard timeout
-            timeout = 30.0
-            response = await self.client.post(
-                self.base_url,
-                json=payload,
-                headers=headers,
-                timeout=timeout
-            )
-            response.raise_for_status()
-            
-            result = response.json()
-            return result["choices"][0]["message"]["content"].strip()
+
+        timeout = 30.0
+        response = await self.client.post(
+            self.base_url,
+            json=payload,
+            headers=headers,
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        result = response.json()
+        choice = result["choices"][0]
+        self._last_llm_meta = {
+            "usage": result.get("usage"),
+            "finish_reason": choice.get("finish_reason"),
+        }
+        return choice["message"]["content"].strip()
+
+    async def _generate_ollama(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int,
+        temperature: float,
+        call_label: str,
+    ) -> str:
+        headers = {"Content-Type": "application/json"}
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+
+        timeout = float(os.getenv("OLLAMA_TIMEOUT", "180"))
+        max_retries = 3
+        retry_delay = 10
+
+        for attempt in range(max_retries):
+            attempt_started = time.perf_counter()
+            try:
+                response = await self.client.post(
+                    self.base_url,
+                    json=payload,
+                    headers=headers,
+                    timeout=timeout,
+                )
+                response.raise_for_status()
+                result = response.json()
+                self._last_llm_meta = {
+                    "usage": result.get("usage"),
+                    "finish_reason": result["choices"][0].get("finish_reason"),
+                }
+                return result["choices"][0]["message"]["content"].strip()
+
+            except httpx.HTTPStatusError as e:
+                duration_ms = (time.perf_counter() - attempt_started) * 1000
+                if e.response.status_code == 500:
+                    try:
+                        error_data = e.response.json()
+                        error_message = error_data.get("error", {}).get("message", "")
+                        if "loading model" in error_message.lower():
+                            will_retry = attempt < max_retries - 1
+                            log_llm_failure(
+                                provider=self.provider_type,
+                                model=self.model or "",
+                                label=call_label,
+                                error=e,
+                                duration_ms=duration_ms,
+                                attempt=attempt + 1,
+                                will_retry=will_retry,
+                            )
+                            if will_retry:
+                                await asyncio.sleep(retry_delay)
+                                retry_delay += 10
+                                continue
+                            raise Exception(
+                                f"Ollama model '{self.model}' is still loading after "
+                                f"{max_retries * retry_delay}s. Try again in a few minutes."
+                            )
+                    except (json.JSONDecodeError, KeyError):
+                        pass
+                raise
+            except Exception as e:
+                duration_ms = (time.perf_counter() - attempt_started) * 1000
+                will_retry = attempt < max_retries - 1
+                log_llm_failure(
+                    provider=self.provider_type,
+                    model=self.model or "",
+                    label=call_label,
+                    error=e,
+                    duration_ms=duration_ms,
+                    attempt=attempt + 1,
+                    will_retry=will_retry,
+                )
+                if not will_retry:
+                    raise
+                await asyncio.sleep(retry_delay)
+
+        raise Exception(f"Ollama request failed after {max_retries} attempts")
     
     async def _generate_google(
         self,
@@ -169,6 +281,7 @@ class AIProvider:
         json_response: bool = False,
         include_suggestions: bool = False,
         response_schema: Optional[Dict[str, Any]] = None,
+        call_label: str = "generic",
     ) -> Union[str, NoReturn]:  # type: ignore
         """Handle Google AI's specific API format with controlled generation for JSON"""
         url = f"{self.base_url}/models/{self.model}:generateContent?key={self.api_key}"
@@ -277,6 +390,7 @@ class AIProvider:
         last_error: Optional[Exception] = None
 
         for attempt in range(max_retries):
+            attempt_started = time.perf_counter()
             try:
                 response = await self.client.post(
                     url,
@@ -286,20 +400,18 @@ class AIProvider:
                 )
                 response.raise_for_status()
                 result = response.json()
+                usage_metadata = result.get("usageMetadata") or {}
 
                 if "candidates" in result and len(result["candidates"]) > 0:
                     candidate = result["candidates"][0]
-
                     finish_reason = candidate.get("finishReason", "")
+                    self._last_llm_meta = {
+                        "usage": usage_metadata,
+                        "finish_reason": finish_reason or "STOP",
+                    }
+
                     if finish_reason in ["SAFETY", "RECITATION", "OTHER"]:
                         raise Exception(f"Google AI blocked the response due to: {finish_reason}")
-                    if finish_reason == "MAX_TOKENS":
-                        usage = result.get("usageMetadata", {})
-                        print(
-                            f"⚠️ Google AI finishReason=MAX_TOKENS "
-                            f"(input: {usage.get('promptTokenCount', '?')}, "
-                            f"output: {usage.get('candidatesTokenCount', '?')}) — parsing available text"
-                        )
 
                     if "content" in candidate:
                         content = candidate["content"]
@@ -326,20 +438,37 @@ class AIProvider:
 
             except httpx.HTTPStatusError as e:
                 last_error = e
-                if e.response.status_code in retryable_status and attempt < max_retries - 1:
+                duration_ms = (time.perf_counter() - attempt_started) * 1000
+                will_retry = e.response.status_code in retryable_status and attempt < max_retries - 1
+                log_llm_failure(
+                    provider=self.provider_type,
+                    model=self.model or "",
+                    label=call_label,
+                    error=e,
+                    duration_ms=duration_ms,
+                    attempt=attempt + 1,
+                    will_retry=will_retry,
+                )
+                if will_retry:
                     delay = min(30, (2 ** attempt) * 2)
-                    print(
-                        f"🔄 Google AI HTTP {e.response.status_code}, "
-                        f"retry {attempt + 1}/{max_retries - 1} in {delay}s..."
-                    )
                     await asyncio.sleep(delay)
                     continue
                 raise
             except httpx.TimeoutException as e:
                 last_error = e
-                if attempt < max_retries - 1:
+                duration_ms = (time.perf_counter() - attempt_started) * 1000
+                will_retry = attempt < max_retries - 1
+                log_llm_failure(
+                    provider=self.provider_type,
+                    model=self.model or "",
+                    label=call_label,
+                    error=e,
+                    duration_ms=duration_ms,
+                    attempt=attempt + 1,
+                    will_retry=will_retry,
+                )
+                if will_retry:
                     delay = min(30, (2 ** attempt) * 2)
-                    print(f"🔄 Google AI timeout, retry {attempt + 1}/{max_retries - 1} in {delay}s...")
                     await asyncio.sleep(delay)
                     continue
                 raise Exception(

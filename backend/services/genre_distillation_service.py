@@ -187,6 +187,7 @@ class GenreDistillationService:
                 temperature=0.2,
                 json_response=True,
                 response_schema=distillation_schema,
+                call_label="meta_genre_distillation",
             )
             diagnostics["response_preview"] = content[:600]
             parsed = json.loads(content)

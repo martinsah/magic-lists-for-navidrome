@@ -379,6 +379,8 @@ AI_API_KEY=your-google-api-key
 AI_MODEL=gemini-2.5-flash
 GOOGLE_AI_TIMEOUT=120
 GOOGLE_AI_MAX_RETRIES=4
+# Human-readable LLM request/response logging to scheduler.log (default: true)
+AI_VERBOSE_LOGGING=true
 ```
 
 ### Groq

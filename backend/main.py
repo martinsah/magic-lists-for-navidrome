@@ -37,6 +37,7 @@ logging.basicConfig(
 
 # Create a specific logger for scheduler activities
 scheduler_logger = logging.getLogger('scheduler')
+logging.getLogger('llm').setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
 
 # Reduce httpx logging verbosity to avoid cluttering scheduler.log
 logging.getLogger('httpx').setLevel(logging.WARNING)
