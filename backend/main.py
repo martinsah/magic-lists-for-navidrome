@@ -1902,7 +1902,6 @@ async def refresh_genre_mix_playlist(scheduled_playlist, db: DatabaseManager):
         scheduler_logger.info(f"🔄 Starting refresh for Genre Mix playlist ID: {scheduled_playlist.navidrome_playlist_id} (frequency: {scheduled_playlist.refresh_frequency})")
 
         nav_client = get_navidrome_client()
-        ai_client_instance = get_ai_client()
 
         playlists = await db.get_all_playlists_with_schedule_info()
         original_playlist = next((p for p in playlists if p.get("navidrome_playlist_id") == scheduled_playlist.navidrome_playlist_id), None)
@@ -1917,7 +1916,6 @@ async def refresh_genre_mix_playlist(scheduled_playlist, db: DatabaseManager):
         curation_options = original_playlist.get("curation_options") or {}
         artist_concentration = float(curation_options.get("artist_concentration", 0.35))
         album_concentration = float(curation_options.get("album_concentration", 0.25))
-        llm_polish = bool(curation_options.get("llm_polish", True))
         selection_mode = str(curation_options.get("genre_selection_mode", "raw")).lower()
         source_genres = curation_options.get("source_genres") or ([curation_options.get("genre")] if curation_options.get("genre") else [genre])
         source_genres = [str(g) for g in source_genres if str(g).strip()]
@@ -1972,33 +1970,22 @@ async def refresh_genre_mix_playlist(scheduled_playlist, db: DatabaseManager):
             f"(artist cap: {assembly_metadata['artist_cap']}, album cap: {assembly_metadata['album_cap']})"
         )
 
-        tracks_for_llm, llm_pool_meta = build_genre_mix_llm_pool(assembly, original_length)
-        if llm_polish:
-            scheduler_logger.info(
-                "🎯 Genre mix refresh LLM pool: "
-                f"{llm_pool_meta.get('llm_seed_count', 0)} seeds + "
-                f"{llm_pool_meta.get('llm_reserve_count', 0)} reserves "
-                f"(cap {llm_pool_meta.get('llm_pool_cap', 0)})"
-            )
-            curation_result = await ai_client_instance.curate_genre_mix(
-                genre=selected_label,
-                tracks_json=tracks_for_llm,
-                num_tracks=original_length,
-                include_reasoning=True,
-                variety_context="This is a scheduled refresh. Preserve most h=true draft tracks unless reserves improve flow.",
-            )
-
-            curated_track_ids, reasoning, _suggested_tracks = unpack_curation_result(curation_result)
-        else:
-            curated_track_ids = [track["id"] for track in assembly["selected_tracks"]]
-            reasoning = (
-                "Heuristic curation: selected tracks by local engagement while limiting repeated artists "
-                f"to {assembly_metadata['artist_cap']} and repeated albums to {assembly_metadata['album_cap']}."
-            )
+        # Scheduled refreshes stay heuristic-only; LLM polish runs on create when opted in.
+        scheduler_logger.info(
+            "🎯 Genre mix scheduled refresh: heuristic-only (skipping LLM to save API quota)"
+        )
+        curated_track_ids = [track["id"] for track in assembly["selected_tracks"]]
+        reasoning = (
+            "Scheduled refresh: heuristic curation from engagement scoring with artist/album caps "
+            f"(artist cap {assembly_metadata['artist_cap']}, album cap {assembly_metadata['album_cap']})."
+        )
 
         if curated_track_ids:
             if len(curated_track_ids) < original_length and len(all_tracks) >= original_length:
-                scheduler_logger.warning(f"⚠️ AI returned only {len(curated_track_ids)} tracks but user requested {original_length}. Using fallback to fill gap.")
+                scheduler_logger.warning(
+                    f"⚠️ Heuristic selection returned only {len(curated_track_ids)} tracks "
+                    f"but user requested {original_length}. Filling from library."
+                )
                 used_ids = set(curated_track_ids)
                 remaining_tracks = [track for track in all_tracks if track["id"] not in used_ids]
                 additional_needed = original_length - len(curated_track_ids)
