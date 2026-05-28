@@ -1,6 +1,7 @@
 import os
 import asyncio
 import time
+import logging
 import httpx
 import json
 import re
@@ -13,6 +14,8 @@ from .llm_logging import (
     log_llm_request,
     log_llm_response,
 )
+
+logger = logging.getLogger("llm")
 
 @dataclass
 class ProviderConfig:
@@ -365,16 +368,19 @@ class AIProvider:
 
         # Optional debug: save payload to file (never block curation on failure)
         if os.getenv("DEBUG_SAVE_AI_PAYLOADS", "").lower() in ("1", "true", "yes"):
-            import time
             timestamp = int(time.time())
             payload_file = f"payloads/google_ai_payload_{timestamp}.json"
             try:
                 os.makedirs("payloads", exist_ok=True)
                 with open(payload_file, "w") as f:
                     json.dump(payload, f, indent=2)
-                print(f"📄 Saved payload to {payload_file} (prompt: ~{len(combined_prompt)//4} tokens)")
+                logger.info(
+                    "Saved debug payload to %s (prompt: ~%s tokens)",
+                    payload_file,
+                    len(combined_prompt) // 4,
+                )
             except OSError as e:
-                print(f"⚠️ Could not save debug payload to {payload_file}: {e}")
+                logger.warning("Could not save debug payload to %s: %s", payload_file, e)
 
         # Large genre-mix prompts need more time than short This Is requests
         base_timeout = float(os.getenv("GOOGLE_AI_TIMEOUT", "120"))

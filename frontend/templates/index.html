@@ -731,6 +731,17 @@
                       <div id="genre-insights-warning" class="hidden p-3 mb-6 text-amber-800 border border-amber-300 rounded-lg bg-amber-50 text-sm"></div>
                       <div id="genre-insights-diagnostics" class="hidden p-3 mb-6 text-blue-800 border border-blue-300 rounded-lg bg-blue-50 text-sm whitespace-pre-wrap"></div>
 
+                      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-2">
+                          <div class="md:col-span-2 lg:col-span-3">
+                              <label for="meta-granularity" class="block text-sm text-gray-900 font-bold mb-2">Meta-Genre Granularity</label>
+                              <select id="meta-granularity" class="w-full max-w-md border border-gray-200 rounded-lg px-3 py-2 text-sm bg-white text-gray-800">
+                                  <option value="coarse">Coarse — fewer, broader groups</option>
+                                  <option value="balanced">Balanced — default</option>
+                                  <option value="fine">Fine — more distinct meta-genres</option>
+                              </select>
+                              <p class="text-xs text-gray-500 mt-1">Controls how many meta-genres the AI creates from your raw tags. After changing this, save settings and run <strong>Refresh Meta-Genres Now</strong>.</p>
+                          </div>
+                      </div>
                       <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
                           <div>
                               <label for="meta-refresh-frequency" class="block text-sm text-gray-900 font-bold mb-2">Refresh Frequency</label>
@@ -897,6 +908,6 @@
             </div>
         </div>
     </div>
-    <script src="/static/app.js?v=1.0.15"></script>
+    <script src="/static/app.js?v=1.0.16"></script>
 </body>
 </html>

@@ -225,9 +225,20 @@ def get_lidarr_service(db: DatabaseManager) -> LidarrService:
     return LidarrService(db=db)
 
 
-def _meta_genre_source_key(library_ids: Optional[List[str]], min_song_count: int) -> str:
+def _normalize_meta_granularity(value: Optional[str]) -> str:
+    from .services.meta_genre_granularity import normalize_meta_genre_granularity
+
+    return normalize_meta_genre_granularity(value)
+
+
+def _meta_genre_source_key(
+    library_ids: Optional[List[str]],
+    min_song_count: int,
+    granularity: str = "balanced",
+) -> str:
     ids = ",".join(sorted([str(i) for i in (library_ids or [])]))
-    return f"libraries={ids}|min_song_count={min_song_count}"
+    gran = _normalize_meta_granularity(granularity)
+    return f"libraries={ids}|min_song_count={min_song_count}|granularity={gran}"
 
 
 def _meta_refresh_due(last_refreshed_iso: Optional[str], frequency: str) -> bool:
@@ -291,11 +302,16 @@ async def _get_effective_meta_genre_settings(db: DatabaseManager) -> Dict[str, i
         minimum=1,
         maximum=24 * 365,
     )
+    granularity = _normalize_meta_granularity(
+        await db.get_config("meta_genre_granularity")
+        or os.getenv("META_GENRE_GRANULARITY", "balanced")
+    )
     return {
         "refresh_frequency": refresh_frequency,
         "min_song_count": min_song_count,
         "min_raw_genres": min_raw_genres,
         "cache_hours": cache_hours,
+        "granularity": granularity,
     }
 
 
@@ -309,12 +325,15 @@ async def _set_meta_genre_settings(db: DatabaseManager, request: MetaGenreSettin
     await db.set_config("meta_genre_min_song_count", str(min_song_count))
     await db.set_config("meta_genre_min_raw_genres", str(min_raw_genres))
     await db.set_config("meta_genre_cache_hours", str(cache_hours))
+    granularity = _normalize_meta_granularity(request.granularity)
+    await db.set_config("meta_genre_granularity", granularity)
 
     return MetaGenreSettingsResponse(
         refresh_frequency=refresh_frequency,
         min_song_count=min_song_count,
         min_raw_genres=min_raw_genres,
         cache_hours=cache_hours,
+        granularity=granularity,
     )
 
 
@@ -328,8 +347,9 @@ async def _build_or_refresh_meta_genres(
 ) -> Dict[str, Any]:
     nav_client = get_navidrome_client()
     distillation_service = get_genre_distillation_service()
-    source_key = _meta_genre_source_key(library_ids, min_song_count)
     settings = await _get_effective_meta_genre_settings(db)
+    granularity = str(settings["granularity"])
+    source_key = _meta_genre_source_key(library_ids, min_song_count, granularity)
     cache_hours = int(cache_hours_override if cache_hours_override is not None else settings["cache_hours"])
     min_raw_genres = int(min_raw_genres_override if min_raw_genres_override is not None else settings["min_raw_genres"])
 
@@ -369,7 +389,7 @@ async def _build_or_refresh_meta_genres(
         payload["model_name"] = snapshot.get("model_name")
         return payload
 
-    distilled = await distillation_service.distill(raw_genres)
+    distilled = await distillation_service.distill(raw_genres, granularity=granularity)
     payload = {
         "groups": distilled.get("groups", []),
         "generated_at": distilled.get("generated_at") or datetime.now().isoformat(),
@@ -546,7 +566,11 @@ async def get_meta_genre_insights(
 ):
     """Return snapshot + cadence insights for meta-genre distillation."""
     settings = await _get_effective_meta_genre_settings(db)
-    source_key = _meta_genre_source_key(library_id, int(settings["min_song_count"]))
+    source_key = _meta_genre_source_key(
+        library_id,
+        int(settings["min_song_count"]),
+        str(settings["granularity"]),
+    )
     snapshot = await db.get_meta_genre_snapshot(source_key)
     last_refresh_at = await db.get_config("meta_genre_last_refresh_at")
 
@@ -615,6 +639,7 @@ async def get_meta_genre_insights(
             min_song_count=int(settings["min_song_count"]),
             min_raw_genres=int(settings["min_raw_genres"]),
             cache_hours=int(settings["cache_hours"]),
+            granularity=str(settings["granularity"]),
         ),
         groups=groups,
         diagnostics=diagnostics,
@@ -949,7 +974,11 @@ async def create_genre_playlist(
             selected_genre_label = request.meta_genre
             meta_settings = await _get_effective_meta_genre_settings(db)
             min_song_count = int(meta_settings["min_song_count"])
-            source_key = _meta_genre_source_key(request.library_ids, min_song_count)
+            source_key = _meta_genre_source_key(
+                request.library_ids,
+                min_song_count,
+                str(meta_settings["granularity"]),
+            )
             snapshot = await db.get_meta_genre_snapshot(source_key)
             if not snapshot:
                 await _build_or_refresh_meta_genres(
@@ -983,7 +1012,7 @@ async def create_genre_playlist(
                     seen_track_ids.add(track_id)
                     all_tracks.append(track)
         scheduler_logger.info(
-            f"🎵 Found {len(all_tracks)} total tracks for Genre Mix selection "
+            f"Found {len(all_tracks)} total tracks for Genre Mix selection "
             f"'{selected_genre_label}' from {len(source_genres)} source genre(s)"
         )
 
@@ -1024,7 +1053,7 @@ async def create_genre_playlist(
             len(assembly["selected_tracks"]) + len(assembly.get("reserve_tracks") or [])
         ):
             scheduler_logger.info(
-                "🎯 Genre mix LLM pool capped: "
+                "Genre mix LLM pool capped: "
                 f"{llm_pool_meta.get('llm_seed_count', 0)} seeds + "
                 f"{llm_pool_meta.get('llm_reserve_count', 0)} reserves "
                 f"(cap {llm_pool_meta.get('llm_pool_cap', 0)})"
@@ -1045,6 +1074,10 @@ async def create_genre_playlist(
 
             curated_track_ids, reasoning, suggested_tracks = unpack_curation_result(curation_result)
         else:
+            scheduler_logger.info(
+                "Genre mix create: heuristic-only (llm_polish=false) - no LLM request; "
+                "enable 'Let the LLM polish ordering' to see LLM logs"
+            )
             curated_track_ids = [track["id"] for track in assembly["selected_tracks"]]
             reasoning = (
                 "Heuristic curation: selected tracks by local engagement while limiting repeated artists "
@@ -1056,24 +1089,29 @@ async def create_genre_playlist(
         if not curated_track_ids:
             if reasoning and "Playlist generation failed" in reasoning:
                 # This is a validation failure - don't create playlist
-                scheduler_logger.error(f"❌ Playlist creation aborted: {reasoning}")
+                scheduler_logger.error(f"Playlist creation aborted: {reasoning}")
                 raise HTTPException(status_code=400, detail=f"Playlist generation failed: {reasoning}")
             else:
                 # This is an empty result without explanation
-                scheduler_logger.error(f"❌ AI curation returned no tracks for {selected_genre_label}")
+                scheduler_logger.error(f"AI curation returned no tracks for {selected_genre_label}")
                 raise HTTPException(status_code=500, detail="AI curation failed to return any tracks")
 
         # Log the AI reasoning for debugging (truncated)
         if reasoning:
             reasoning_preview = reasoning[:200] + "..." if len(reasoning) > 200 else reasoning
-            scheduler_logger.info(f"🎵 AI curation applied for {selected_genre_label} (reasoning length: {len(reasoning)} chars): {reasoning_preview}")
+            scheduler_logger.info(
+                f"AI curation applied for {selected_genre_label} "
+                f"(reasoning length: {len(reasoning)} chars): {reasoning_preview}"
+            )
         else:
-            scheduler_logger.info(f"⚠️ No AI reasoning provided for {selected_genre_label}")
+            scheduler_logger.info(f"No AI reasoning provided for {selected_genre_label}")
 
         # Create playlist in Navidrome with AI reasoning as comment
         comment_to_use = _comment_with_playlist_date(reasoning, is_update=False)
         comment_preview = comment_to_use[:200] + "..." if comment_to_use and len(comment_to_use) > 200 else comment_to_use
-        scheduler_logger.info(f"💬 Creating playlist with comment (length: {len(comment_to_use) if comment_to_use else 0}): {comment_preview}")
+        scheduler_logger.info(
+            f"Creating playlist with comment (length: {len(comment_to_use) if comment_to_use else 0}): {comment_preview}"
+        )
 
         navidrome_playlist_id = await nav_client.create_playlist(
             name=playlist_name,
@@ -1923,7 +1961,7 @@ async def refresh_genre_mix_playlist(scheduled_playlist, db: DatabaseManager):
         selected_label = curation_options.get("meta_genre") if selection_mode == "meta" else (curation_options.get("genre") or genre)
         selected_label = selected_label or genre
 
-        scheduler_logger.info(f"🎯 Refreshing Genre Mix '{selected_label}' with original length: {original_length}")
+        scheduler_logger.info(f"Refreshing Genre Mix '{selected_label}' with original length: {original_length}")
 
         all_tracks = []
         seen_track_ids = set()
@@ -1935,16 +1973,20 @@ async def refresh_genre_mix_playlist(scheduled_playlist, db: DatabaseManager):
                     seen_track_ids.add(track_id)
                     all_tracks.append(track)
         scheduler_logger.info(
-            f"🎵 Found {len(all_tracks)} total tracks for Genre Mix selection "
+            f"Found {len(all_tracks)} total tracks for Genre Mix selection "
             f"'{selected_label}' from {len(source_genres)} source genre(s)"
         )
 
         if not all_tracks:
-            scheduler_logger.warning(f"⚠️ No tracks found for selection {selected_label} in playlist {scheduled_playlist.navidrome_playlist_id}")
+            scheduler_logger.warning(
+                f"No tracks found for selection {selected_label} in playlist {scheduled_playlist.navidrome_playlist_id}"
+            )
             return
 
         if len(all_tracks) < original_length:
-            scheduler_logger.warning(f"⚠️ Genre only has {len(all_tracks)} tracks, but user requested {original_length}. Using all available tracks.")
+            scheduler_logger.warning(
+                f"Genre only has {len(all_tracks)} tracks, but user requested {original_length}. Using all available tracks."
+            )
             original_length = len(all_tracks)
 
         library_stats = await nav_client.get_library_stats()
@@ -1965,15 +2007,15 @@ async def refresh_genre_mix_playlist(scheduled_playlist, db: DatabaseManager):
         )
 
         scheduler_logger.info(
-            "🎯 Genre mix heuristic assembly: "
-            f"{assembly_metadata['source_count']} source tracks → "
+            "Genre mix heuristic assembly: "
+            f"{assembly_metadata['source_count']} source tracks -> "
             f"{assembly_metadata['selected_count']} draft tracks "
             f"(artist cap: {assembly_metadata['artist_cap']}, album cap: {assembly_metadata['album_cap']})"
         )
 
         # Scheduled refreshes stay heuristic-only; LLM polish runs on create when opted in.
         scheduler_logger.info(
-            "🎯 Genre mix scheduled refresh: heuristic-only (skipping LLM to save API quota)"
+            "Genre mix scheduled refresh: heuristic-only (skipping LLM to save API quota)"
         )
         curated_track_ids = [track["id"] for track in assembly["selected_tracks"]]
         reasoning = (

@@ -612,6 +612,7 @@ function renderGenreInsights(insights) {
         ['Meta Groups', String(insights.total_groups || 0)],
         ['Singleton Groups', String(insights.singleton_groups || 0)],
         ['Stale', insights.stale ? 'Yes' : 'No'],
+        ['Granularity', settings.granularity || 'balanced'],
     ];
     cards.innerHTML = values.map(([label, value]) => `
         <div class="border border-gray-200 rounded-lg p-3 bg-gray-50">
@@ -621,6 +622,7 @@ function renderGenreInsights(insights) {
     `).join('');
 
     document.getElementById('meta-refresh-frequency').value = settings.refresh_frequency || 'weekly';
+    document.getElementById('meta-granularity').value = settings.granularity || 'balanced';
     document.getElementById('meta-min-song-count').value = settings.min_song_count ?? 0;
     document.getElementById('meta-min-raw-genres').value = settings.min_raw_genres ?? 30;
     document.getElementById('meta-cache-hours').value = settings.cache_hours ?? 168;
@@ -646,6 +648,10 @@ function renderGenreInsights(insights) {
         if (typeof diagnostics.matched_member_count !== 'undefined') diagnosticsLines.push(`Matched members: ${diagnostics.matched_member_count}`);
         if (typeof diagnostics.unmatched_member_count !== 'undefined') diagnosticsLines.push(`Unmatched members: ${diagnostics.unmatched_member_count}`);
         if (typeof diagnostics.leftover_count !== 'undefined') diagnosticsLines.push(`Leftovers auto-added: ${diagnostics.leftover_count}`);
+        if (diagnostics.granularity) diagnosticsLines.push(`Granularity: ${diagnostics.granularity}`);
+        if (typeof diagnostics.target_group_low !== 'undefined' && typeof diagnostics.target_group_high !== 'undefined') {
+            diagnosticsLines.push(`Target groups: ${diagnostics.target_group_low}-${diagnostics.target_group_high}`);
+        }
         if (diagnostics.degraded_snapshot_rejected) diagnosticsLines.push('Degraded snapshot rejected: yes');
         diagnosticsEl.classList.remove('hidden');
         diagnosticsEl.textContent = diagnosticsLines.join('\n');
@@ -701,6 +707,7 @@ async function saveMetaGenreSettings() {
     try {
         const payload = {
             refresh_frequency: document.getElementById('meta-refresh-frequency').value,
+            granularity: document.getElementById('meta-granularity').value || 'balanced',
             min_song_count: parseInt(document.getElementById('meta-min-song-count').value || '0', 10),
             min_raw_genres: parseInt(document.getElementById('meta-min-raw-genres').value || '30', 10),
             cache_hours: parseInt(document.getElementById('meta-cache-hours').value || '168', 10),
@@ -714,7 +721,7 @@ async function saveMetaGenreSettings() {
             const errorData = await response.json().catch(() => ({ detail: 'Failed to save settings' }));
             throw new Error(errorData.detail || 'Failed to save settings');
         }
-        showToast('success', 'Distillation settings updated');
+        showToast('success', 'Distillation settings saved. Refresh meta-genres if you changed granularity.');
         await loadGenreInsights();
     } catch (error) {
         console.error('Error saving meta-genre settings:', error);

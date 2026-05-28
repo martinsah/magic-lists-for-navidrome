@@ -4,9 +4,9 @@ import json
 import unittest
 
 from backend.services.llm_logging import (
+    humanize_user_prompt_for_log,
     infer_call_label,
     summarize_parsed_response,
-    _truncate_user_prompt_for_log,
 )
 
 
@@ -32,15 +32,29 @@ class LlmLoggingTests(unittest.TestCase):
         self.assertIn("30", joined)
         self.assertIn("Aphex Twin", joined)
 
-    def test_truncate_large_candidate_blob(self):
-        huge = (
-            "genre_mix: Select 50 tracks. Candidates (i=index, t=title): "
-            + json.dumps([{"i": n, "t": f"Track {n}"} for n in range(500)])
+    def test_humanize_genre_mix_candidates(self):
+        candidates = [
+            {"i": 0, "t": "Palace of OKV in Reverse", "a": "Kurt Vile", "p": 3, "l": False, "h": True},
+            {"i": 1, "t": "Night Destroyer", "a": "Red Fang", "p": 2, "l": True, "h": True},
+        ]
+        prompt = (
+            "genre_mix: Select exactly 50 tracks for 'Rock'. "
+            "Candidates (i=index, t=title, a=artist, p=play_count, l=liked, h=heuristic_seed): "
+            + json.dumps(candidates)
             + ". Keep reasoning short."
         )
-        condensed = _truncate_user_prompt_for_log(huge, max_chars=2000)
-        self.assertIn("500 candidate objects", condensed)
-        self.assertLess(len(condensed), len(huge))
+        readable = humanize_user_prompt_for_log(prompt)
+        self.assertIn("Kurt Vile - Palace of OKV in Reverse", readable)
+        self.assertIn("Red Fang - Night Destroyer", readable)
+        self.assertIn("heuristic seed", readable)
+        self.assertNotIn('{"i":0', readable)
+
+    def test_humanize_raw_genres(self):
+        genres = [{"name": "Rock", "songCount": 100}, {"name": "Punk", "songCount": 50}]
+        prompt = 'Group genres.\n\nraw_genres=' + json.dumps(genres)
+        readable = humanize_user_prompt_for_log(prompt)
+        self.assertIn("Rock (100 tracks)", readable)
+        self.assertIn("Punk (50 tracks)", readable)
 
 
 if __name__ == "__main__":

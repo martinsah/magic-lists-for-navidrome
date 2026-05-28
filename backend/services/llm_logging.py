@@ -16,8 +16,10 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("llm")
 
-_SEPARATOR = "─" * 72
+_SEPARATOR = "-" * 72
 _BLOCK_WIDTH = 100
+_MAX_CANDIDATE_LINES = 120
+_MAX_GENRE_LINES = 80
 
 
 def is_verbose() -> bool:
@@ -76,6 +78,130 @@ def _try_parse_json(content: str) -> Optional[Any]:
     return None
 
 
+def _format_indexed_track_candidates(candidates: List[Dict[str, Any]], max_lines: int) -> List[str]:
+    lines = [f"Candidate tracks ({len(candidates)} total):"]
+    for item in candidates[:max_lines]:
+        index = item.get("i", item.get("index", "?"))
+        title = item.get("t", item.get("title", "Unknown"))
+        artist = item.get("a", item.get("artist", "Unknown"))
+        plays = item.get("p", item.get("play_count", 0))
+        liked = item.get("l", item.get("liked", item.get("local_library_likes", False)))
+        seed = item.get("h", item.get("_heuristic_seed", item.get("heuristic_seed", False)))
+        tags: List[str] = []
+        if liked:
+            tags.append("liked")
+        if seed:
+            tags.append("heuristic seed")
+        tag_text = f" [{', '.join(tags)}]" if tags else ""
+        lines.append(f"  [{index}] {artist} - {title} (plays: {plays}){tag_text}")
+    if len(candidates) > max_lines:
+        lines.append(f"  ... and {len(candidates) - max_lines} more candidates")
+    return lines
+
+
+def _format_raw_genre_list(genres: List[Any], max_lines: int) -> List[str]:
+    lines = [f"Raw genres ({len(genres)} total):"]
+    for entry in genres[:max_lines]:
+        if isinstance(entry, dict):
+            name = entry.get("name", entry.get("genre", "?"))
+            count = entry.get("songCount", entry.get("song_count", entry.get("count", "?")))
+            lines.append(f"  - {name} ({count} tracks)")
+        else:
+            lines.append(f"  - {entry}")
+    if len(genres) > max_lines:
+        lines.append(f"  ... and {len(genres) - max_lines} more genres")
+    return lines
+
+
+def _format_track_objects(tracks: List[Dict[str, Any]], max_lines: int) -> List[str]:
+    lines = [f"Tracks ({len(tracks)} total):"]
+    for idx, track in enumerate(tracks[:max_lines]):
+        title = track.get("title", track.get("t", "Unknown"))
+        artist = track.get("artist", track.get("a", "Unknown"))
+        album = track.get("album", "")
+        album_text = f" | album: {album}" if album else ""
+        lines.append(f"  [{idx}] {artist} - {title}{album_text}")
+    if len(tracks) > max_lines:
+        lines.append(f"  ... and {len(tracks) - max_lines} more tracks")
+    return lines
+
+
+def humanize_user_prompt_for_log(user_prompt: str, max_chars: int = 24000) -> str:
+    """Expand embedded JSON in prompts into readable track/genre lists for logs."""
+    text = user_prompt or ""
+
+    candidates_match = re.search(
+        r"(Candidates\s*\([^)]*\):\s*)(\[[\s\S]*\])",
+        text,
+    )
+    if candidates_match:
+        prefix = text[: candidates_match.start(1)].strip()
+        suffix = text[candidates_match.end(2) :].strip()
+        try:
+            candidates = json.loads(candidates_match.group(2))
+            if isinstance(candidates, list):
+                body_lines = []
+                if prefix:
+                    body_lines.append(prefix)
+                    body_lines.append("")
+                body_lines.extend(_format_indexed_track_candidates(candidates, _MAX_CANDIDATE_LINES))
+                if suffix:
+                    body_lines.append("")
+                    body_lines.append(suffix)
+                return _cap_log_text("\n".join(body_lines), max_chars)
+        except json.JSONDecodeError:
+            pass
+
+    raw_genres_match = re.search(r"(raw_genres=)(\[[\s\S]*\])", text)
+    if raw_genres_match:
+        prefix = text[: raw_genres_match.start(1)].strip()
+        suffix = text[raw_genres_match.end(2) :].strip()
+        try:
+            genres = json.loads(raw_genres_match.group(2))
+            if isinstance(genres, list):
+                body_lines = []
+                if prefix:
+                    body_lines.append(prefix)
+                    body_lines.append("")
+                body_lines.extend(_format_raw_genre_list(genres, _MAX_GENRE_LINES))
+                if suffix:
+                    body_lines.append("")
+                    body_lines.append(suffix)
+                return _cap_log_text("\n".join(body_lines), max_chars)
+        except json.JSONDecodeError:
+            pass
+
+    tracks_match = re.search(r"(Tracks:\s*)(\[[\s\S]*\])", text)
+    if tracks_match:
+        prefix = text[: tracks_match.start(1)].strip()
+        suffix = text[tracks_match.end(2) :].strip()
+        try:
+            tracks = json.loads(tracks_match.group(2))
+            if isinstance(tracks, list):
+                body_lines = []
+                if prefix:
+                    body_lines.append(prefix)
+                    body_lines.append("")
+                if tracks and isinstance(tracks[0], dict):
+                    body_lines.extend(_format_track_objects(tracks, _MAX_CANDIDATE_LINES))
+                else:
+                    body_lines.append(f"  (list with {len(tracks)} entries)")
+                if suffix:
+                    body_lines.append("")
+                    body_lines.append(suffix)
+                return _cap_log_text("\n".join(body_lines), max_chars)
+        except json.JSONDecodeError:
+            pass
+
+    return _cap_log_text(text, max_chars)
+
+
+def _cap_log_text(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + f"\n\n... [truncated for log: {len(text) - max_chars} more characters]"
+
+
 def summarize_parsed_response(data: Any) -> List[str]:
     """Build human-readable bullets from a parsed JSON response."""
     lines: List[str] = []
@@ -93,24 +219,24 @@ def summarize_parsed_response(data: Any) -> List[str]:
             count = group.get("total_song_count", "?")
             preview = ", ".join(str(m) for m in members[:4])
             if len(members) > 4:
-                preview += f", … (+{len(members) - 4} more)"
+                preview += f", ... (+{len(members) - 4} more)"
             lines.append(f"  [{idx + 1}] {name} ({len(members)} genres, {count} tracks): {preview}")
         if len(groups) > 12:
-            lines.append(f"  … and {len(groups) - 12} more groups")
+            lines.append(f"  ... and {len(groups) - 12} more groups")
 
     if "track_ids" in data:
         track_ids = data.get("track_ids") or []
         lines.append(f"Selected track indices: {len(track_ids)}")
         if track_ids:
             preview = track_ids[:20]
-            suffix = f" … (+{len(track_ids) - 20} more)" if len(track_ids) > 20 else ""
+            suffix = f" ... (+{len(track_ids) - 20} more)" if len(track_ids) > 20 else ""
             lines.append(f"  Indices: {preview}{suffix}")
 
     if "reasoning" in data and data.get("reasoning"):
         reasoning = str(data["reasoning"])
         lines.append(f"Reasoning ({len(reasoning)} chars): {reasoning[:500]}")
         if len(reasoning) > 500:
-            lines.append(f"  … ({len(reasoning) - 500} more characters)")
+            lines.append(f"  ... ({len(reasoning) - 500} more characters)")
 
     suggested = data.get("suggested_tracks")
     if isinstance(suggested, list) and suggested:
@@ -119,10 +245,10 @@ def summarize_parsed_response(data: Any) -> List[str]:
             title = track.get("title", "?")
             artist = track.get("artist", "?")
             album = track.get("album", "")
-            album_bit = f" — {album}" if album else ""
+            album_bit = f" | album: {album}" if album else ""
             lines.append(f"  [{idx + 1}] {artist} - {title}{album_bit}")
         if len(suggested) > 8:
-            lines.append(f"  … and {len(suggested) - 8} more suggestions")
+            lines.append(f"  ... and {len(suggested) - 8} more suggestions")
 
     if "mode" in data:
         lines.append(f"Mode: {data.get('mode')}")
@@ -175,6 +301,7 @@ def log_llm_request(
     user_est = estimate_tokens(user_prompt)
     system_est = estimate_tokens(system_prompt)
     total_est = user_est + system_est
+    readable_user = humanize_user_prompt_for_log(user_prompt)
 
     header = (
         f"LLM REQUEST [{label}] provider={provider} model={model} "
@@ -192,39 +319,8 @@ def log_llm_request(
         len(system_prompt) + len(user_prompt),
     )
     logger.info("%s", _wrap_block("System prompt:", system_prompt))
-    logger.info("%s", _wrap_block("User prompt:", _truncate_user_prompt_for_log(user_prompt)))
+    logger.info("%s", _wrap_block("User prompt (readable):", readable_user))
     logger.info("%s", _SEPARATOR)
-
-
-def _truncate_user_prompt_for_log(user_prompt: str, max_chars: int = 12000) -> str:
-    """Show full prompt up to max_chars; summarize embedded candidate JSON arrays."""
-    if len(user_prompt) <= max_chars:
-        return user_prompt
-
-    # Genre mix / rediscover embed large JSON candidate lists
-    candidates_match = re.search(
-        r"(Candidates\s*\([^)]*\):\s*)(\[[\s\S]*\])",
-        user_prompt,
-    )
-    if candidates_match:
-        prefix = user_prompt[: candidates_match.start(1)]
-        suffix = user_prompt[candidates_match.end(2) :]
-        array_text = candidates_match.group(2)
-        item_count = array_text.count('"i":')
-        if item_count == 0:
-            item_count = array_text.count('"id":')
-        summary = (
-            f"{candidates_match.group(1)}[… {item_count} candidate objects, "
-            f"{len(array_text)} chars omitted from log …]"
-        )
-        condensed = prefix + summary + suffix
-        if len(condensed) <= max_chars:
-            return condensed
-
-    return (
-        user_prompt[:max_chars]
-        + f"\n\n… [truncated for log: {len(user_prompt) - max_chars} more characters] …"
-    )
 
 
 def log_llm_response(
@@ -259,14 +355,14 @@ def log_llm_response(
         try:
             pretty = json.dumps(parsed, indent=2, ensure_ascii=False)
             if len(pretty) > 8000:
-                pretty = pretty[:8000] + f"\n… [truncated: {len(pretty) - 8000} more chars]"
+                pretty = pretty[:8000] + f"\n... [truncated: {len(pretty) - 8000} more chars]"
             logger.info("  Pretty JSON:\n%s", textwrap.indent(pretty, "    "))
         except (TypeError, ValueError):
             pass
     else:
         preview = (content or "")[:2000]
         if len(content or "") > 2000:
-            preview += f"\n… [truncated: {len(content) - 2000} more chars]"
+            preview += f"\n... [truncated: {len(content) - 2000} more chars]"
         logger.info("%s", _wrap_block("Raw text (not valid JSON):", preview))
 
     logger.info("%s", _SEPARATOR)

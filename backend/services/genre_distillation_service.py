@@ -7,6 +7,11 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..services.ai_providers import get_ai_provider
+from .meta_genre_granularity import (
+    build_meta_distillation_prompts,
+    normalize_meta_genre_granularity,
+    target_meta_group_range,
+)
 
 
 class GenreDistillationService:
@@ -101,15 +106,24 @@ class GenreDistillationService:
                 best_idx = idx
         return best_idx, best_score
 
-    async def distill(self, raw_genres: List[Dict[str, Any]]) -> Dict[str, Any]:
+    async def distill(
+        self,
+        raw_genres: List[Dict[str, Any]],
+        granularity: str = "balanced",
+    ) -> Dict[str, Any]:
+        granularity = normalize_meta_genre_granularity(granularity)
         canonical = self._canonicalize_raw_genres(raw_genres)
         generated_at = datetime.now().isoformat()
+        target_low, target_high = target_meta_group_range(len(canonical), granularity)
         diagnostics: Dict[str, Any] = {
             "llm_attempted": False,
             "provider_available": False,
             "fallback_used": False,
             "fallback_reason": None,
             "raw_genre_count": len(canonical),
+            "granularity": granularity,
+            "target_group_low": target_low,
+            "target_group_high": target_high,
         }
         if not canonical:
             return {
@@ -141,21 +155,18 @@ class GenreDistillationService:
                 "diagnostics": diagnostics,
             }
 
-        system_prompt = (
-            "You are a music taxonomy assistant. Group raw genres into broader meta-genres. "
-            "Return JSON only. Each raw genre must appear exactly once across all groups."
+        system_prompt, user_prompt, _prompt_meta = build_meta_distillation_prompts(
+            canonical, granularity
         )
-        user_prompt = (
-            "Given this list of raw genres with song counts, return JSON with shape "
-            '{"groups":[{"meta_genre":"string","genres":["raw1","raw2"],"total_song_count":123}]}. '
-            "Use concise meta-genre names and keep groups meaningful.\n\n"
-            f"raw_genres={json.dumps(canonical, ensure_ascii=False)}"
-        )
+        max_tokens = 8192 if granularity == "fine" and len(canonical) > 150 else 4096
 
         diagnostics["llm_attempted"] = True
         self.logger.info(
-            "🧠 Starting meta-genre distillation for %s raw genres using %s",
+            "Starting meta-genre distillation: raw=%s, granularity=%s, target_groups=%s-%s, model=%s",
             len(canonical),
+            granularity,
+            target_low,
+            target_high,
             provider.model,
         )
         try:
@@ -183,7 +194,7 @@ class GenreDistillationService:
             content = await provider.generate(
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
-                max_tokens=4096,
+                max_tokens=max_tokens,
                 temperature=0.2,
                 json_response=True,
                 response_schema=distillation_schema,

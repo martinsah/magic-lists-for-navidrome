@@ -56,6 +56,7 @@ class MetaGenreSettingsRequest(BaseModel):
     min_song_count: int = 0
     min_raw_genres: int = 30
     cache_hours: int = 168
+    granularity: str = "balanced"  # coarse | balanced | fine
 
 
 class MetaGenreSettingsResponse(BaseModel):
@@ -63,6 +64,7 @@ class MetaGenreSettingsResponse(BaseModel):
     min_song_count: int
     min_raw_genres: int
     cache_hours: int
+    granularity: str
 
 
 class MetaGenreInsightsResponse(BaseModel):

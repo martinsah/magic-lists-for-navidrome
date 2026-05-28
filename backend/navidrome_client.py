@@ -111,12 +111,12 @@ class NavidromeClient:
             if library_ids_list:
                 # Fetch from specific libraries
                 for lib_id in library_ids_list:
-                    print(f"🎵 Fetching artists from library ID: {lib_id}")
+                    print(f" Fetching artists from library ID: {lib_id}")
                     artists = await self._get_artists_from_library(lib_id)
                     all_artists.extend(artists)
             else:
                 # Fetch from all libraries (no filter)
-                print("🎵 Fetching artists from all libraries")
+                print(" Fetching artists from all libraries")
                 artists = await self._get_artists_from_library(None)
                 all_artists.extend(artists)
 
@@ -128,11 +128,11 @@ class NavidromeClient:
                     unique_artists.append(artist)
                     seen_ids.add(artist['id'])
 
-            print(f"✅ Retrieved {len(unique_artists)} unique artists from {len(library_ids_list) if library_ids_list else 'all'} libraries")
+            print(f" Retrieved {len(unique_artists)} unique artists from {len(library_ids_list) if library_ids_list else 'all'} libraries")
             return unique_artists
 
         except Exception as e:
-            print(f"❌ Error in get_artists: {e}")
+            print(f" Error in get_artists: {e}")
             raise
 
     async def _get_artists_from_library(self, library_id: Union[str, None]) -> List[Dict[str, Any]]:
@@ -143,11 +143,11 @@ class NavidromeClient:
             # Add library filter if specified
             if library_id:
                 params["musicFolderId"] = library_id
-                print(f"🎵 Using library ID: {library_id}")
+                print(f" Using library ID: {library_id}")
 
             # Log the full request for debugging (minus auth details)
             log_params = {k: v for k, v in params.items() if k not in ['t', 's']}
-            print(f"🌐 getArtists request: GET {self.base_url}/rest/getArtists.view with params: {log_params}")
+            print(f" getArtists request: GET {self.base_url}/rest/getArtists.view with params: {log_params}")
 
             response = await self.client.get(
                 f"{self.base_url}/rest/getArtists.view",
@@ -156,7 +156,7 @@ class NavidromeClient:
             response.raise_for_status()
 
             data = response.json()
-            print(f"📊 getArtists response status: {response.status_code}")
+            print(f" getArtists response status: {response.status_code}")
 
             # Handle Subsonic API response format
             subsonic_response = data.get("subsonic-response", {})
@@ -165,18 +165,18 @@ class NavidromeClient:
                 error_message = error.get('message', 'Unknown error')
                 error_code = error.get('code', 0)
 
-                print(f"❌ Subsonic API error: {error_message} (code: {error_code})")
+                print(f" Subsonic API error: {error_message} (code: {error_code})")
 
                 # Handle "Library not found" error
                 if "Library not found" in error_message or "empty" in error_message.lower():
-                    print("⚠️ Library not found error detected - attempting retry without library filter")
+                    print("Warning: Library not found error detected - attempting retry without library filter")
 
                     # Retry without library filter
                     retry_params = self._get_subsonic_params()
                     # Remove any library-specific parameters
                     retry_params.pop("musicFolderId", None)
 
-                    print(f"🔄 Retry getArtists request: GET {self.base_url}/rest/getArtists.view with params: {retry_params}")
+                    print(f" Retry getArtists request: GET {self.base_url}/rest/getArtists.view with params: {retry_params}")
 
                     retry_response = await self.client.get(
                         f"{self.base_url}/rest/getArtists.view",
@@ -187,10 +187,10 @@ class NavidromeClient:
                     retry_data = retry_response.json()
                     retry_subsonic = retry_data.get("subsonic-response", {})
 
-                    print(f"📊 Retry getArtists response status: {retry_response.status_code}")
+                    print(f" Retry getArtists response status: {retry_response.status_code}")
 
                     if retry_subsonic.get("status") == "ok":
-                        print("✅ Retry successful - multiple libraries detected, using all available libraries")
+                        print(" Retry successful - multiple libraries detected, using all available libraries")
                         data = retry_data
                         subsonic_response = retry_subsonic
                     else:
@@ -214,17 +214,17 @@ class NavidromeClient:
                         "name": artist.get("name")
                     })
 
-            print(f"✅ Successfully fetched {len(artists_list)} artists from Navidrome")
+            print(f" Successfully fetched {len(artists_list)} artists from Navidrome")
             return artists_list
 
         except httpx.RequestError as e:
-            print(f"🌐 Network error in getArtists: {e}")
+            print(f" Network error in getArtists: {e}")
             raise Exception(f"Network error connecting to Navidrome: {e}")
         except httpx.HTTPStatusError as e:
-            print(f"🚨 HTTP error in getArtists: {e.response.status_code} - {e.response.text}")
+            print(f" HTTP error in getArtists: {e.response.status_code} - {e.response.text}")
             raise Exception(f"HTTP error from Navidrome: {e.response.status_code}")
         except Exception as e:
-            print(f"💥 Unexpected error in getArtists: {e}")
+            print(f" Unexpected error in getArtists: {e}")
             raise Exception(f"Unexpected error fetching artists: {e}")
 
     async def get_music_folders(self) -> List[Dict[str, Any]]:
@@ -238,7 +238,7 @@ class NavidromeClient:
 
             params = self._get_subsonic_params()
 
-            print(f"🌐 getMusicFolders request: GET {self.base_url}/rest/getMusicFolders.view")
+            print(f" getMusicFolders request: GET {self.base_url}/rest/getMusicFolders.view")
 
             response = await self.client.get(
                 f"{self.base_url}/rest/getMusicFolders.view",
@@ -268,11 +268,11 @@ class NavidromeClient:
                     "name": folder.get("name", "Unknown Library")
                 })
 
-            print(f"📁 Found {len(result)} music folders: {[f['name'] for f in result]}")
+            print(f" Found {len(result)} music folders: {[f['name'] for f in result]}")
             return result
 
         except Exception as e:
-            print(f"💥 Error fetching music folders: {e}")
+            print(f" Error fetching music folders: {e}")
             raise Exception(f"Failed to fetch music folders: {e}")
 
     async def get_tracks_by_artist(self, artist_id: str, library_ids: Union[List[str], None] = None) -> List[Dict[str, Any]]:
@@ -373,7 +373,7 @@ class NavidromeClient:
             batch_size = 500  # Max allowed by API
 
             library_filter = library_ids[0] if library_ids and len(library_ids) > 0 else None
-            print(f"🎵 Starting genre track collection for '{genre}'{' in library ' + library_filter if library_filter else ''}")
+            print(f"Starting genre track collection for '{genre}'{' in library ' + library_filter if library_filter else ''}")
 
             while True:
                 params = self._get_subsonic_params()
@@ -402,7 +402,7 @@ class NavidromeClient:
 
                     # If getSongsByGenre is not supported, fall back to search approach
                     if "not implemented" in error_msg.lower() or error_code == 0:
-                        print(f"⚠️ getSongsByGenre not supported, falling back to search method")
+                        print(f"Warning: getSongsByGenre not supported, falling back to search method")
                         return await self._get_tracks_by_genre_fallback(genre)
                     else:
                         raise Exception(f"Subsonic API error: {error_msg}")
@@ -434,7 +434,7 @@ class NavidromeClient:
                 total_fetched += batch_count
                 offset += batch_size
 
-                print(f"📦 Fetched batch: {batch_count} tracks (total: {total_fetched})")
+                print(f"Fetched batch: {batch_count} tracks (total: {total_fetched})")
 
                 # Safety check: prevent infinite loops
                 if batch_count < batch_size:
@@ -442,10 +442,10 @@ class NavidromeClient:
 
                 # Safety check: prevent too many API calls (max 100 batches = 50k tracks)
                 if offset >= 50000:
-                    print(f"⚠️ Reached safety limit of 50k tracks for genre '{genre}'")
+                    print(f"Warning: Reached safety limit of 50k tracks for genre '{genre}'")
                     break
 
-            print(f"✅ Completed genre collection: {len(all_tracks)} tracks for '{genre}'")
+            print(f"Completed genre collection: {len(all_tracks)} tracks for '{genre}'")
             return all_tracks
 
         except httpx.RequestError as e:
@@ -464,7 +464,7 @@ class NavidromeClient:
         Returns:
             List of tracks with format: {id, title, album, year, play_count}
         """
-        print(f"🔄 Using fallback search method for genre '{genre}'")
+        print(f"Using fallback search method for genre '{genre}'")
 
         try:
             await self._ensure_authenticated()
@@ -510,11 +510,11 @@ class NavidromeClient:
                     }
                     tracks_list.append(track)
 
-            print(f"✅ Fallback method found {len(tracks_list)} tracks for '{genre}'")
+            print(f"Fallback method found {len(tracks_list)} tracks for '{genre}'")
             return tracks_list
 
         except Exception as e:
-            print(f"❌ Fallback method also failed: {e}")
+            print(f"Fallback method also failed: {e}")
             return []
 
     async def get_genres(self, library_ids: Union[List[str], str, None] = None) -> List[Dict[str, Any]]:
@@ -551,7 +551,7 @@ class NavidromeClient:
             if library_ids_list:
                 # Fetch from specific libraries
                 for lib_id in library_ids_list:
-                    print(f"🎵 Fetching genres from library ID: {lib_id}")
+                    print(f" Fetching genres from library ID: {lib_id}")
                     genres = await self._get_genres_from_library(lib_id)
                     for genre in genres:
                         name = genre["name"]
@@ -562,7 +562,7 @@ class NavidromeClient:
                             all_genres[name] = count
             else:
                 # Fetch from all libraries (no filter)
-                print("🎵 Fetching genres from all libraries")
+                print(" Fetching genres from all libraries")
                 genres = await self._get_genres_from_library(None)
                 for genre in genres:
                     name = genre["name"]
@@ -572,11 +572,11 @@ class NavidromeClient:
             # Convert to list of genre objects
             genre_list = [{"name": name, "songCount": count} for name, count in all_genres.items()]
 
-            print(f"✅ Retrieved {len(genre_list)} unique genres from {len(library_ids_list) if library_ids_list else 'all'} libraries")
+            print(f" Retrieved {len(genre_list)} unique genres from {len(library_ids_list) if library_ids_list else 'all'} libraries")
             return sorted(genre_list, key=lambda x: x["name"])
 
         except Exception as e:
-            print(f"❌ Error in get_genres: {e}")
+            print(f" Error in get_genres: {e}")
             raise
 
     async def _get_genres_from_library(self, library_id: Union[str, None]) -> List[Dict[str, Any]]:
@@ -619,11 +619,11 @@ class NavidromeClient:
                         })
 
                 if genres:
-                    print(f"✅ Retrieved {len(genres)} genres using getGenres endpoint")
+                    print(f" Retrieved {len(genres)} genres using getGenres endpoint")
                     return genres
 
             except Exception as e:
-                print(f"⚠️ getGenres endpoint failed ({e}), falling back to search-based method")
+                print(f"Warning: getGenres endpoint failed ({e}), falling back to search-based method")
 
             # Fallback: Use search-based method with larger sample
             params = self._get_subsonic_params()
@@ -666,7 +666,7 @@ class NavidromeClient:
             # Convert to list of genre objects
             genres = [{"name": name, "songCount": count} for name, count in genre_counts.items()]
 
-            print(f"📊 Retrieved {len(genres)} genres using search fallback method (sampled {len(songs)} tracks)")
+            print(f" Retrieved {len(genres)} genres using search fallback method (sampled {len(songs)} tracks)")
             return genres
 
         except httpx.RequestError as e:
@@ -752,7 +752,7 @@ class NavidromeClient:
                     "path": song.get("path")
                 })
 
-            print(f"⭐ Retrieved {len(tracks)} starred tracks")
+            print(f"Retrieved {len(tracks)} starred tracks")
             return tracks
 
         except httpx.RequestError as e:
@@ -901,7 +901,7 @@ class NavidromeClient:
             return best_match
 
         except Exception as e:
-            print(f"⚠️ find_song_by_artist_title failed for {artist} - {title}: {e}")
+            print(f"Warning: find_song_by_artist_title failed for {artist} - {title}: {e}")
             return None
 
     async def append_tracks_to_playlist(self, playlist_id: str, track_ids: List[str]) -> bool:
@@ -928,11 +928,11 @@ class NavidromeClient:
                 error = update_subsonic.get("error", {})
                 raise Exception(f"Failed to append songs to playlist: {error.get('message', 'Unknown error')}")
 
-            print(f"➕ Appended {len(track_ids)} suggested track(s) to playlist {playlist_id}")
+            print(f" Appended {len(track_ids)} suggested track(s) to playlist {playlist_id}")
             return True
 
         except Exception as e:
-            print(f"⚠️ append_tracks_to_playlist failed: {e}")
+            print(f"Warning: append_tracks_to_playlist failed: {e}")
             return False
 
     async def create_playlist(self, name: str, track_ids: List[str], comment: str = None) -> str:
@@ -976,7 +976,7 @@ class NavidromeClient:
             
             # Add tracks to the playlist if provided - PRESERVE ORDER
             if track_ids:
-                print(f"🎵 Adding {len(track_ids)} tracks to playlist in AI-curated order using updatePlaylist...")
+                print(f" Adding {len(track_ids)} tracks to playlist in AI-curated order using updatePlaylist...")
                 
                 # Use proper Subsonic API with multiple songIdToAdd parameters in single call
                 update_params = self._get_subsonic_params()
@@ -996,11 +996,11 @@ class NavidromeClient:
                     error = update_subsonic.get("error", {})
                     raise Exception(f"Failed to add songs to playlist: {error.get('message', 'Unknown error')}")
                 
-                print(f"🎯 Successfully added all {len(track_ids)} tracks in single API call")
+                print(f" Successfully added all {len(track_ids)} tracks in single API call")
             
             # Add comment via updatePlaylist if provided (createPlaylist doesn't support comments)
             if comment:
-                print(f"💬 Adding comment to playlist via updatePlaylist...")
+                print(f" Adding comment to playlist via updatePlaylist...")
                 comment_params = self._get_subsonic_params()
                 comment_params["playlistId"] = playlist_id
                 comment_params["comment"] = comment
@@ -1015,9 +1015,9 @@ class NavidromeClient:
                 comment_subsonic = comment_data.get("subsonic-response", {})
                 if comment_subsonic.get("status") != "ok":
                     error = comment_subsonic.get("error", {})
-                    print(f"⚠️ Warning: Failed to add comment to playlist: {error.get('message', 'Unknown error')}")
+                    print(f"Warning: Failed to add comment to playlist: {error.get('message', 'Unknown error')}")
                 else:
-                    print(f"✅ Successfully added comment to playlist")
+                    print(f" Successfully added comment to playlist")
                 
             return playlist_id
                 
@@ -1096,7 +1096,7 @@ class NavidromeClient:
             
             # Then add the new tracks - PRESERVE ORDER
             if track_ids:
-                print(f"🎵 Updating playlist with {len(track_ids)} tracks in AI-curated order...")
+                print(f" Updating playlist with {len(track_ids)} tracks in AI-curated order...")
                 
                 # Use proper Subsonic API with multiple songIdToAdd parameters in single call
                 update_params = self._get_subsonic_params()
@@ -1116,7 +1116,7 @@ class NavidromeClient:
                     error = update_subsonic.get("error", {})
                     raise Exception(f"Failed to add songs to playlist: {error.get('message', 'Unknown error')}")
                 
-                print(f"🎯 Successfully updated playlist with all {len(track_ids)} tracks in single API call")
+                print(f" Successfully updated playlist with all {len(track_ids)} tracks in single API call")
             
             return True
                 
@@ -1142,9 +1142,9 @@ class NavidromeClient:
             params = self._get_subsonic_params()
             params["id"] = playlist_id  # According to Subsonic API docs, parameter should be "id", not "playlistId"
             
-            print(f"🗑️ Attempting to delete playlist with ID: {playlist_id}")
-            print(f"🔧 Delete request URL: {self.base_url}/rest/deletePlaylist.view")
-            print(f"🔧 Delete request params: {params}")
+            print(f" Attempting to delete playlist with ID: {playlist_id}")
+            print(f" Delete request URL: {self.base_url}/rest/deletePlaylist.view")
+            print(f" Delete request params: {params}")
             
             response = await self.client.get(
                 f"{self.base_url}/rest/deletePlaylist.view",
@@ -1153,29 +1153,29 @@ class NavidromeClient:
             response.raise_for_status()
             
             data = response.json()
-            print(f"🔧 Delete response data: {data}")
+            print(f" Delete response data: {data}")
             
             subsonic_response = data.get("subsonic-response", {})
-            print(f"🔧 Subsonic response status: {subsonic_response.get('status')}")
+            print(f" Subsonic response status: {subsonic_response.get('status')}")
             
             if subsonic_response.get("status") != "ok":
                 error = subsonic_response.get("error", {})
                 error_message = error.get('message', 'Unknown error')
                 error_code = error.get('code', 'Unknown code')
-                print(f"❌ Subsonic API error: {error_message} (code: {error_code})")
+                print(f" Subsonic API error: {error_message} (code: {error_code})")
                 raise Exception(f"Failed to delete playlist: {error_message} (code: {error_code})")
             
-            print(f"✅ Successfully deleted playlist {playlist_id} from Navidrome")
+            print(f" Successfully deleted playlist {playlist_id} from Navidrome")
             return True
                 
         except httpx.RequestError as e:
-            print(f"🌐 Network error deleting playlist: {e}")
+            print(f" Network error deleting playlist: {e}")
             raise Exception(f"Network error connecting to Navidrome: {e}")
         except httpx.HTTPStatusError as e:
-            print(f"🚨 HTTP error deleting playlist: {e.response.status_code} - {e.response.text}")
+            print(f" HTTP error deleting playlist: {e.response.status_code} - {e.response.text}")
             raise Exception(f"HTTP error from Navidrome: {e.response.status_code} - {e.response.text}")
         except Exception as e:
-            print(f"💥 Unexpected error deleting playlist: {e}")
+            print(f" Unexpected error deleting playlist: {e}")
             raise Exception(f"Unexpected error deleting playlist: {e}")
     
     async def get_total_song_count(self) -> int:
@@ -1207,7 +1207,7 @@ class NavidromeClient:
             scan_status = subsonic_response.get("scanStatus", {})
             count = scan_status.get("count", 0)
             
-            print(f"📊 Total song count in library (via startScan): {count}")
+            print(f" Total song count in library (via startScan): {count}")
             return count
                 
         except httpx.RequestError as e:
@@ -1241,11 +1241,11 @@ class NavidromeClient:
                 'total_tracks': total_tracks
             }
 
-            print(f"📊 Calculated library stats: {stats}")
+            print(f" Calculated library stats: {stats}")
             return stats
 
         except Exception as e:
-            print(f"⚠️ Error getting library stats, using defaults: {e}")
+            print(f"Warning: Error getting library stats, using defaults: {e}")
             # Return safe defaults if we can't get stats
             return {
                 'max_play_count': 100,
