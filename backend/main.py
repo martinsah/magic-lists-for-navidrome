@@ -45,7 +45,7 @@ logging.getLogger('httpcore').setLevel(logging.WARNING)
 from .navidrome_client import NavidromeClient
 from .ai_client import AIClient
 from .database import DatabaseManager, get_db
-from .schemas import CreatePlaylistRequest, CreateGenrePlaylistRequest, Playlist, RediscoverWeeklyResponse, RediscoverWeeklyV2Response, CreateRediscoverPlaylistRequest, PlaylistWithScheduleInfo, LidarrAddRequest, LidarrBulkAddRequest, PlaylistSettingsRequest, ScheduledPlaylist
+from .schemas import CreatePlaylistRequest, CreateGenrePlaylistRequest, Playlist, RediscoverWeeklyResponse, RediscoverWeeklyV2Response, CreateRediscoverPlaylistRequest, PlaylistWithScheduleInfo, LidarrAddRequest, LidarrBulkAddRequest, PlaylistSettingsRequest, ScheduledPlaylist, MetaGenreResponse
 from .recipe_manager import recipe_manager
 from .rediscover import RediscoverWeekly, ReDiscoverV2Processor
 from .track_scoring import filter_tracks_for_this_is_playlist
@@ -56,6 +56,7 @@ from .suggestion_service import (
     missing_recommendations_enabled,
 )
 from .lidarr_service import LidarrService, lidarr_integration_enabled, lidarr_configured
+from .services.genre_distillation_service import GenreDistillationService
 # SYSTEM CHECK FEATURE - START
 from .services.health_check_service import HealthCheckService
 # SYSTEM CHECK FEATURE - END
@@ -90,6 +91,17 @@ async def _apply_missing_recommendations(
     row = next((p for p in playlists if p.get("id") == playlist_db_id), None)
     missing = row.get("recommended_missing", []) if row else []
     return song_titles, missing, added_count
+
+
+def _comment_with_playlist_date(base_comment: Optional[str], is_update: bool) -> str:
+    """Append create/update date to playlist comment persisted in Navidrome."""
+    date_stamp = datetime.now().strftime("%Y-%m-%d")
+    label = "Last updated" if is_update else "Created"
+    date_line = f"{label}: {date_stamp}"
+    content = (base_comment or "").strip()
+    if content:
+        return f"{content}\n\n{date_line}"
+    return date_line
 
 
 app = FastAPI(title="MagicLists Navidrome MVP")
@@ -173,6 +185,7 @@ templates = Jinja2Templates(directory="frontend/templates")
 # Initialize clients (lazy loading)
 navidrome_client = None
 ai_client = None
+genre_distillation_service = None
 
 # Initialize scheduler (will be started on app startup)
 scheduler = None
@@ -196,8 +209,104 @@ def get_ai_client():
     return ai_client
 
 
+def get_genre_distillation_service():
+    global genre_distillation_service
+    if genre_distillation_service is None:
+        genre_distillation_service = GenreDistillationService()
+    return genre_distillation_service
+
+
 def get_lidarr_service(db: DatabaseManager) -> LidarrService:
     return LidarrService(db=db)
+
+
+def _meta_genre_source_key(library_ids: Optional[List[str]], min_song_count: int) -> str:
+    ids = ",".join(sorted([str(i) for i in (library_ids or [])]))
+    return f"libraries={ids}|min_song_count={min_song_count}"
+
+
+def _meta_refresh_due(last_refreshed_iso: Optional[str], frequency: str) -> bool:
+    if frequency == "none":
+        return False
+    if not last_refreshed_iso:
+        return True
+    try:
+        last = datetime.fromisoformat(last_refreshed_iso)
+    except ValueError:
+        return True
+
+    elapsed = datetime.now() - last
+    if frequency == "daily":
+        return elapsed >= timedelta(days=1)
+    if frequency == "weekly":
+        return elapsed >= timedelta(days=7)
+    if frequency == "monthly":
+        return elapsed >= timedelta(days=30)
+    return False
+
+
+async def _build_or_refresh_meta_genres(
+    db: DatabaseManager,
+    library_ids: Optional[List[str]],
+    min_song_count: int,
+    force: bool = False,
+) -> Dict[str, Any]:
+    nav_client = get_navidrome_client()
+    distillation_service = get_genre_distillation_service()
+    source_key = _meta_genre_source_key(library_ids, min_song_count)
+    cache_hours = int(os.getenv("META_GENRE_CACHE_HOURS", "168"))
+    min_raw_genres = int(os.getenv("META_GENRE_MIN_RAW_GENRES", "30"))
+
+    raw_genres = await nav_client.get_genres(library_ids)
+    if min_song_count > 0:
+        raw_genres = [g for g in raw_genres if int(g.get("songCount", 0)) >= min_song_count]
+    source_hash = distillation_service.source_hash(raw_genres)
+
+    snapshot = await db.get_meta_genre_snapshot(source_key)
+    is_stale = await db.is_meta_genre_snapshot_stale(source_key, max_age_hours=cache_hours)
+
+    if (
+        snapshot
+        and not force
+        and not is_stale
+        and snapshot.get("source_hash") == source_hash
+        and snapshot.get("payload")
+    ):
+        payload = snapshot["payload"]
+        payload["stale"] = False
+        payload["source_hash"] = snapshot.get("source_hash")
+        payload["source_key"] = source_key
+        payload["model_name"] = snapshot.get("model_name")
+        return payload
+
+    if len(raw_genres) < min_raw_genres and snapshot and not force:
+        payload = snapshot["payload"]
+        payload["stale"] = True
+        payload["source_hash"] = snapshot.get("source_hash")
+        payload["source_key"] = source_key
+        payload["model_name"] = snapshot.get("model_name")
+        return payload
+
+    distilled = await distillation_service.distill(raw_genres)
+    payload = {
+        "groups": distilled.get("groups", []),
+        "generated_at": distilled.get("generated_at") or datetime.now().isoformat(),
+        "raw_genre_count": distilled.get("raw_genre_count", len(raw_genres)),
+    }
+
+    await db.upsert_meta_genre_snapshot(
+        source_key=source_key,
+        source_hash=source_hash,
+        payload=payload,
+        raw_genre_count=payload["raw_genre_count"],
+        model_name=distilled.get("model_name"),
+        generated_at=payload["generated_at"],
+    )
+    payload["source_hash"] = source_hash
+    payload["source_key"] = source_key
+    payload["model_name"] = distilled.get("model_name")
+    payload["stale"] = False
+    return payload
 
 @app.get("/", response_class=HTMLResponse)
 async def read_root(request: Request):
@@ -256,6 +365,46 @@ async def get_genres(
             raise HTTPException(status_code=503, detail=f"Cannot connect to Navidrome server: {error_msg}")
         else:
             raise HTTPException(status_code=500, detail=f"Failed to fetch genres: {error_msg}")
+
+
+@app.get("/api/genres/meta", response_model=MetaGenreResponse)
+async def get_meta_genres(
+    db: DatabaseManager = Depends(get_db),
+    library_id: List[str] = Query(None),
+    min_song_count: int = Query(0, ge=0),
+):
+    """Get distilled meta-genres while preserving raw genre support."""
+    try:
+        payload = await _build_or_refresh_meta_genres(
+            db=db,
+            library_ids=library_id,
+            min_song_count=min_song_count,
+            force=False,
+        )
+        return payload
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch meta genres: {str(e)}")
+
+
+@app.post("/api/genres/meta/refresh", response_model=MetaGenreResponse)
+async def refresh_meta_genres(
+    db: DatabaseManager = Depends(get_db),
+    library_id: List[str] = Query(None),
+    min_song_count: int = Query(0, ge=0),
+):
+    """Manually refresh distilled meta-genre cache."""
+    try:
+        payload = await _build_or_refresh_meta_genres(
+            db=db,
+            library_ids=library_id,
+            min_song_count=min_song_count,
+            force=True,
+        )
+        await db.set_config("meta_genre_last_refresh_at", datetime.now().isoformat())
+        return payload
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to refresh meta genres: {str(e)}")
+
 
 @app.get("/api/music-folders")
 async def get_music_folders():
@@ -399,7 +548,7 @@ async def create_playlist(
             scheduler_logger.info(f"⚠️ No AI reasoning provided for {', '.join(artist_names)}")
 
         # Create playlist in Navidrome with AI reasoning as comment
-        comment_to_use = reasoning if reasoning else None
+        comment_to_use = _comment_with_playlist_date(reasoning, is_update=False)
         comment_preview = comment_to_use[:200] + "..." if comment_to_use and len(comment_to_use) > 200 else comment_to_use
         scheduler_logger.info(f"💬 Creating playlist with comment (length: {len(comment_to_use) if comment_to_use else 0}): {comment_preview}")
 
@@ -523,7 +672,7 @@ async def create_playlist_with_reasoning(
         navidrome_playlist_id = await nav_client.create_playlist(
             name=playlist_name,
             track_ids=curated_track_ids,
-            comment=reasoning if reasoning else None
+            comment=_comment_with_playlist_date(reasoning, is_update=False)
         )
         
         # Get track titles for database storage
@@ -564,15 +713,55 @@ async def create_genre_playlist(
         nav_client = get_navidrome_client()
         ai_client_instance = get_ai_client()
 
-        # Generate playlist name if not provided
-        playlist_name = request.playlist_name or f"Genre Mix: {request.genre}"
+        selection_mode = (request.genre_selection_mode or "raw").lower()
+        if selection_mode not in {"raw", "meta"}:
+            raise HTTPException(status_code=400, detail="genre_selection_mode must be 'raw' or 'meta'")
 
-        # Get tracks for the genre
-        all_tracks = await nav_client.get_tracks_by_genre(request.genre, request.library_ids)
-        scheduler_logger.info(f"🎵 Found {len(all_tracks)} total tracks for genre '{request.genre}'")
+        selected_genre_label = request.genre
+        source_genres: List[str] = []
+        if selection_mode == "meta" or request.meta_genre:
+            if not request.meta_genre:
+                raise HTTPException(status_code=400, detail="meta_genre is required when genre_selection_mode='meta'")
+            selected_genre_label = request.meta_genre
+            min_song_count = int(os.getenv("META_GENRE_MIN_SONG_COUNT", "0"))
+            source_key = _meta_genre_source_key(request.library_ids, min_song_count)
+            snapshot = await db.get_meta_genre_snapshot(source_key)
+            if not snapshot:
+                await _build_or_refresh_meta_genres(
+                    db=db,
+                    library_ids=request.library_ids,
+                    min_song_count=min_song_count,
+                    force=True,
+                )
+                snapshot = await db.get_meta_genre_snapshot(source_key)
+            source_genres = get_genre_distillation_service().resolve_meta_genre(request.meta_genre, snapshot)
+            if not source_genres:
+                raise HTTPException(status_code=404, detail=f"Meta-genre '{request.meta_genre}' has no mapped genres")
+        else:
+            if not request.genre:
+                raise HTTPException(status_code=400, detail="genre is required when genre_selection_mode='raw'")
+            source_genres = [request.genre]
+
+        # Generate playlist name if not provided
+        playlist_name = request.playlist_name or f"Genre Mix: {selected_genre_label}"
+
+        # Get tracks for one or many source genres
+        all_tracks = []
+        seen_track_ids = set()
+        for source_genre in source_genres:
+            tracks = await nav_client.get_tracks_by_genre(source_genre, request.library_ids)
+            for track in tracks:
+                track_id = track.get("id")
+                if track_id and track_id not in seen_track_ids:
+                    seen_track_ids.add(track_id)
+                    all_tracks.append(track)
+        scheduler_logger.info(
+            f"🎵 Found {len(all_tracks)} total tracks for Genre Mix selection "
+            f"'{selected_genre_label}' from {len(source_genres)} source genre(s)"
+        )
 
         if not all_tracks:
-            raise HTTPException(status_code=404, detail=f"No tracks found for genre: {request.genre}")
+            raise HTTPException(status_code=404, detail=f"No tracks found for selection: {selected_genre_label}")
 
         # Assemble a deterministic draft from the full genre slice before any LLM pass.
         library_stats = await nav_client.get_library_stats()
@@ -586,7 +775,7 @@ async def create_genre_playlist(
         assembly_metadata = assembly["metadata"]
         await db.record_scoring_run(
             source_key=f"navidrome:{nav_client.base_url}",
-            recipe_id=f"genre_mix:{request.genre}",
+            recipe_id=f"genre_mix:{selected_genre_label}",
             scoring_version=SCORING_VERSION,
             params=assembly_metadata,
             scored_tracks=assembly["scored_tracks"],
@@ -610,7 +799,7 @@ async def create_genre_playlist(
         if request.llm_polish:
             # Use AI as a polish/repair pass over the deterministic draft and reserves.
             curation_result = await ai_client_instance.curate_genre_mix(
-                genre=request.genre,
+                genre=selected_genre_label,
                 tracks_json=tracks_for_llm,
                 num_tracks=request.playlist_length,
                 include_reasoning=True,
@@ -637,18 +826,18 @@ async def create_genre_playlist(
                 raise HTTPException(status_code=400, detail=f"Playlist generation failed: {reasoning}")
             else:
                 # This is an empty result without explanation
-                scheduler_logger.error(f"❌ AI curation returned no tracks for {request.genre}")
+                scheduler_logger.error(f"❌ AI curation returned no tracks for {selected_genre_label}")
                 raise HTTPException(status_code=500, detail="AI curation failed to return any tracks")
 
         # Log the AI reasoning for debugging (truncated)
         if reasoning:
             reasoning_preview = reasoning[:200] + "..." if len(reasoning) > 200 else reasoning
-            scheduler_logger.info(f"🎵 AI curation applied for {request.genre} (reasoning length: {len(reasoning)} chars): {reasoning_preview}")
+            scheduler_logger.info(f"🎵 AI curation applied for {selected_genre_label} (reasoning length: {len(reasoning)} chars): {reasoning_preview}")
         else:
-            scheduler_logger.info(f"⚠️ No AI reasoning provided for {request.genre}")
+            scheduler_logger.info(f"⚠️ No AI reasoning provided for {selected_genre_label}")
 
         # Create playlist in Navidrome with AI reasoning as comment
-        comment_to_use = reasoning if reasoning else None
+        comment_to_use = _comment_with_playlist_date(reasoning, is_update=False)
         comment_preview = comment_to_use[:200] + "..." if comment_to_use and len(comment_to_use) > 200 else comment_to_use
         scheduler_logger.info(f"💬 Creating playlist with comment (length: {len(comment_to_use) if comment_to_use else 0}): {comment_preview}")
 
@@ -663,13 +852,22 @@ async def create_genre_playlist(
 
         # Store playlist in local database (using genre as identifier)
         playlist = await db.create_playlist(
-            artist_id=request.genre,  # Using genre as artist_id for now
+            artist_id=selected_genre_label,
             playlist_name=playlist_name,
             songs=track_titles,
             reasoning=reasoning,
             navidrome_playlist_id=navidrome_playlist_id,
             playlist_length=request.playlist_length,
-            library_ids=request.library_ids
+            library_ids=request.library_ids,
+            curation_options={
+                "artist_concentration": request.artist_concentration,
+                "album_concentration": request.album_concentration,
+                "llm_polish": request.llm_polish,
+                "genre_selection_mode": selection_mode,
+                "genre": request.genre,
+                "meta_genre": request.meta_genre,
+                "source_genres": source_genres,
+            },
         )
 
         recommended_missing = []
@@ -851,7 +1049,10 @@ async def create_rediscover_playlist_v2(
         scheduler_logger.info(f"🎵 Track IDs: {track_ids[:5]}... (total: {len(track_ids)})")
 
         # Create playlist in Navidrome with reasoning as comment
-        comment_to_use = ai_reasoning if ai_reasoning else f"Theme: {playlist_data.get('theme', 'Mixed')}"
+        comment_to_use = _comment_with_playlist_date(
+            ai_reasoning if ai_reasoning else f"Theme: {playlist_data.get('theme', 'Mixed')}",
+            is_update=False,
+        )
         comment_preview = comment_to_use[:200] + "..." if len(comment_to_use) > 200 else comment_to_use
         scheduler_logger.info(f"💬 Creating Re-Discover v2.0 playlist with comment (length: {len(comment_to_use)}): {comment_preview}")
 
@@ -984,7 +1185,10 @@ async def create_rediscover_playlist(
         scheduler_logger.info(f"🎵 Track IDs: {track_ids[:5]}... (total: {len(track_ids)})")
 
         # Create playlist in Navidrome with AI reasoning as comment if available
-        comment_to_use = ai_reasoning if (ai_reasoning and ai_curated) else None
+        comment_to_use = _comment_with_playlist_date(
+            ai_reasoning if (ai_reasoning and ai_curated) else "",
+            is_update=False,
+        )
         comment_preview = comment_to_use[:200] + "..." if comment_to_use and len(comment_to_use) > 200 else comment_to_use
         scheduler_logger.info(f"💬 Creating Re-Discover playlist with comment (length: {len(comment_to_use) if comment_to_use else 0}): {comment_preview}")
 
@@ -1128,6 +1332,31 @@ def schedule_playlist_refresh():
         )
         scheduler_logger.info("🔄 Playlist refresh job scheduled to run every 12 hours (1:01 AM and 1:01 PM)")
 
+
+async def maybe_refresh_meta_genres(db: DatabaseManager):
+    """Periodically refresh distilled meta-genre cache based on configured cadence."""
+    frequency = os.getenv("META_GENRE_REFRESH_FREQUENCY", "weekly").lower()
+    if frequency == "none":
+        return
+
+    last_refreshed = await db.get_config("meta_genre_last_refresh_at")
+    if not _meta_refresh_due(last_refreshed, frequency):
+        return
+
+    min_song_count = int(os.getenv("META_GENRE_MIN_SONG_COUNT", "0"))
+    try:
+        await _build_or_refresh_meta_genres(
+            db=db,
+            library_ids=None,
+            min_song_count=min_song_count,
+            force=True,
+        )
+        await db.set_config("meta_genre_last_refresh_at", datetime.now().isoformat())
+        scheduler_logger.info("✅ Refreshed meta-genre distillation cache")
+    except Exception as exc:
+        scheduler_logger.warning(f"⚠️ Meta-genre distillation refresh skipped due to error: {exc}")
+
+
 async def refresh_scheduled_playlists():
     """Check for and refresh scheduled playlists that are due"""
     try:
@@ -1149,6 +1378,7 @@ async def refresh_scheduled_playlists():
         db_path = os.getenv("DATABASE_PATH", default_path)
         db = DatabaseManager(db_path)
         current_time = datetime.now()
+        await maybe_refresh_meta_genres(db)
         
         # Get playlists due for refresh (including 7-day catch-up window)
         scheduled_playlists = await db.get_scheduled_playlists_due(current_time, grace_hours=168)
@@ -1275,7 +1505,10 @@ async def refresh_rediscover_playlist(scheduled_playlist, db: DatabaseManager):
             
             # Update the existing playlist in Navidrome with reasoning
             track_ids = [track["id"] for track in tracks]
-            comment_to_use = ai_reasoning if (ai_reasoning and ai_curated) else "Re-Discover Weekly v2.0 - Automatically refreshed"
+            comment_to_use = _comment_with_playlist_date(
+                ai_reasoning if (ai_reasoning and ai_curated) else "Re-Discover Weekly v2.0 - Automatically refreshed",
+                is_update=True,
+            )
             await nav_client.update_playlist(
                 playlist_id=scheduled_playlist.navidrome_playlist_id,
                 track_ids=track_ids,
@@ -1393,7 +1626,7 @@ async def refresh_this_is_playlist(scheduled_playlist, db: DatabaseManager):
                 await nav_client.update_playlist(
                     playlist_id=scheduled_playlist.navidrome_playlist_id,
                     track_ids=curated_track_ids,
-                    comment=reasoning if reasoning else None
+                    comment=_comment_with_playlist_date(reasoning, is_update=True)
                 )
                 
                 # Update the local database with new songs and reasoning
@@ -1449,14 +1682,30 @@ async def refresh_genre_mix_playlist(scheduled_playlist, db: DatabaseManager):
         artist_concentration = float(curation_options.get("artist_concentration", 0.35))
         album_concentration = float(curation_options.get("album_concentration", 0.25))
         llm_polish = bool(curation_options.get("llm_polish", True))
+        selection_mode = str(curation_options.get("genre_selection_mode", "raw")).lower()
+        source_genres = curation_options.get("source_genres") or ([curation_options.get("genre")] if curation_options.get("genre") else [genre])
+        source_genres = [str(g) for g in source_genres if str(g).strip()]
+        selected_label = curation_options.get("meta_genre") if selection_mode == "meta" else (curation_options.get("genre") or genre)
+        selected_label = selected_label or genre
 
-        scheduler_logger.info(f"🎯 Refreshing Genre Mix '{genre}' with original length: {original_length}")
+        scheduler_logger.info(f"🎯 Refreshing Genre Mix '{selected_label}' with original length: {original_length}")
 
-        all_tracks = await nav_client.get_tracks_by_genre(genre, library_ids)
-        scheduler_logger.info(f"🎵 Found {len(all_tracks)} total tracks for genre '{genre}' (fresh data)")
+        all_tracks = []
+        seen_track_ids = set()
+        for source_genre in source_genres:
+            tracks = await nav_client.get_tracks_by_genre(source_genre, library_ids)
+            for track in tracks:
+                track_id = track.get("id")
+                if track_id and track_id not in seen_track_ids:
+                    seen_track_ids.add(track_id)
+                    all_tracks.append(track)
+        scheduler_logger.info(
+            f"🎵 Found {len(all_tracks)} total tracks for Genre Mix selection "
+            f"'{selected_label}' from {len(source_genres)} source genre(s)"
+        )
 
         if not all_tracks:
-            scheduler_logger.warning(f"⚠️ No tracks found for genre {genre} in playlist {scheduled_playlist.navidrome_playlist_id}")
+            scheduler_logger.warning(f"⚠️ No tracks found for selection {selected_label} in playlist {scheduled_playlist.navidrome_playlist_id}")
             return
 
         if len(all_tracks) < original_length:
@@ -1474,7 +1723,7 @@ async def refresh_genre_mix_playlist(scheduled_playlist, db: DatabaseManager):
         assembly_metadata = assembly["metadata"]
         await db.record_scoring_run(
             source_key=f"navidrome:{nav_client.base_url}",
-            recipe_id=f"genre_mix:{genre}",
+            recipe_id=f"genre_mix:{selected_label}",
             scoring_version=SCORING_VERSION,
             params=assembly_metadata,
             scored_tracks=assembly["scored_tracks"],
@@ -1495,7 +1744,7 @@ async def refresh_genre_mix_playlist(scheduled_playlist, db: DatabaseManager):
         tracks_for_llm = selected_tracks + assembly["reserve_tracks"]
         if llm_polish:
             curation_result = await ai_client_instance.curate_genre_mix(
-                genre=genre,
+                genre=selected_label,
                 tracks_json=tracks_for_llm,
                 num_tracks=original_length,
                 include_reasoning=True,
@@ -1523,7 +1772,7 @@ async def refresh_genre_mix_playlist(scheduled_playlist, db: DatabaseManager):
             await nav_client.update_playlist(
                 playlist_id=scheduled_playlist.navidrome_playlist_id,
                 track_ids=curated_track_ids,
-                comment=reasoning if reasoning else None,
+                comment=_comment_with_playlist_date(reasoning, is_update=True),
             )
 
             track_id_to_title = {track["id"]: track["title"] for track in all_tracks}

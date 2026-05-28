@@ -2,7 +2,7 @@ import sqlite3
 import aiosqlite
 import os
 from typing import Any, List, Optional, Dict
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 
 from .schemas import Playlist, ScheduledPlaylist
@@ -163,6 +163,23 @@ class DatabaseManager:
             # Create index on expires_at for cleanup
             await db.execute("""
                 CREATE INDEX IF NOT EXISTS idx_api_cache_expires ON api_cache(expires_at)
+            """)
+
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS meta_genre_snapshots (
+                    source_key TEXT PRIMARY KEY,
+                    source_hash TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    raw_genre_count INTEGER NOT NULL DEFAULT 0,
+                    model_name TEXT,
+                    generated_at TIMESTAMP NOT NULL,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            await db.execute("""
+                CREATE INDEX IF NOT EXISTS idx_meta_genre_generated_at
+                ON meta_genre_snapshots(generated_at)
             """)
 
             await db.execute("""
@@ -973,6 +990,89 @@ class DatabaseManager:
             deleted_count = cursor.rowcount
             await db.commit()
             return deleted_count
+
+    async def get_meta_genre_snapshot(self, source_key: str) -> Optional[Dict[str, Any]]:
+        """Get latest meta-genre snapshot for a source."""
+        await self.init_db()
+
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute("""
+                SELECT source_key, source_hash, payload_json, raw_genre_count, model_name, generated_at, updated_at
+                FROM meta_genre_snapshots
+                WHERE source_key = ?
+            """, (source_key,)) as cursor:
+                row = await cursor.fetchone()
+                if not row:
+                    return None
+                payload = json.loads(row[2]) if row[2] else {}
+                return {
+                    "source_key": row[0],
+                    "source_hash": row[1],
+                    "payload": payload,
+                    "raw_genre_count": row[3] or 0,
+                    "model_name": row[4],
+                    "generated_at": row[5],
+                    "updated_at": row[6],
+                }
+
+    async def upsert_meta_genre_snapshot(
+        self,
+        source_key: str,
+        source_hash: str,
+        payload: Dict[str, Any],
+        raw_genre_count: int,
+        model_name: Optional[str] = None,
+        generated_at: Optional[str] = None,
+    ) -> bool:
+        """Insert or update a distilled meta-genre snapshot."""
+        await self.init_db()
+
+        generated_value = generated_at or datetime.now().isoformat()
+        payload_json = json.dumps(payload or {}, sort_keys=True)
+
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("""
+                INSERT INTO meta_genre_snapshots (
+                    source_key,
+                    source_hash,
+                    payload_json,
+                    raw_genre_count,
+                    model_name,
+                    generated_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(source_key) DO UPDATE SET
+                    source_hash = excluded.source_hash,
+                    payload_json = excluded.payload_json,
+                    raw_genre_count = excluded.raw_genre_count,
+                    model_name = excluded.model_name,
+                    generated_at = excluded.generated_at,
+                    updated_at = CURRENT_TIMESTAMP
+            """, (
+                source_key,
+                source_hash,
+                payload_json,
+                raw_genre_count,
+                model_name,
+                generated_value,
+            ))
+            await db.commit()
+            return True
+
+    async def is_meta_genre_snapshot_stale(self, source_key: str, max_age_hours: int) -> bool:
+        """Return True when snapshot is missing or older than max_age_hours."""
+        snapshot = await self.get_meta_genre_snapshot(source_key)
+        if not snapshot:
+            return True
+
+        try:
+            generated_at = datetime.fromisoformat(str(snapshot["generated_at"]))
+        except ValueError:
+            return True
+
+        cutoff = datetime.now() - timedelta(hours=max_age_hours)
+        return generated_at < cutoff
 
 # Dependency for FastAPI
 async def get_db() -> DatabaseManager:

@@ -560,8 +560,20 @@
 
                          <!-- Genre Selection -->
                          <div>
+                            <label class="block text-sm text-gray-900 font-bold mb-2">Selection Mode</label>
+                            <div class="flex flex-wrap gap-4 mb-3">
+                                <label class="flex items-center text-sm text-gray-600">
+                                    <input type="radio" name="genre-selection-mode" value="raw" checked class="shrink-0 mt-0.5 border-gray-200 rounded-full text-blue-600 focus:ring-blue-500">
+                                    <span class="ms-2">Raw Genres</span>
+                                </label>
+                                <label class="flex items-center text-sm text-gray-600">
+                                    <input type="radio" name="genre-selection-mode" value="meta" class="shrink-0 mt-0.5 border-gray-200 rounded-full text-blue-600 focus:ring-blue-500">
+                                    <span class="ms-2">Meta-Genres</span>
+                                </label>
+                            </div>
+
                              <label for="genre-select" class="block text-sm text-gray-900 font-bold mb-2">Choose a genre from your library</label>
-                             <div class="relative">
+                            <div id="raw-genre-select-wrap" class="relative">
                                  <select
                                      id="genre-select"
                                      data-hs-select='{
@@ -581,6 +593,13 @@
                                      <option value="">Choose a genre</option>
                                  </select>
                              </div>
+                            <div id="meta-genre-select-wrap" class="relative hidden mt-3">
+                                <label for="meta-genre-select" class="block text-sm text-gray-900 font-bold mb-2">Choose a meta-genre</label>
+                                <select id="meta-genre-select" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm bg-white text-gray-800">
+                                    <option value="">Choose a meta-genre</option>
+                                </select>
+                                <p id="meta-genre-hint" class="text-xs text-gray-500 mt-2">Meta-genres are distilled from your library and may combine multiple similar raw genres.</p>
+                            </div>
                          </div>
 
                         <!-- Options Grid -->
@@ -830,6 +849,6 @@
             </div>
         </div>
     </div>
-    <script src="/static/app.js?v=1.0.8"></script>
+    <script src="/static/app.js?v=1.0.9"></script>
 </body>
 </html>

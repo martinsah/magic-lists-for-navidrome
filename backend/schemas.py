@@ -22,7 +22,9 @@ class CreatePlaylistRequest(BaseModel):
 
 class CreateGenrePlaylistRequest(BaseModel):
     """Request schema for creating a genre mix playlist"""
-    genre: str
+    genre: Optional[str] = None
+    meta_genre: Optional[str] = None
+    genre_selection_mode: str = "raw"  # raw | meta
     playlist_name: Optional[str] = None  # Optional, will auto-generate if not provided
     refresh_frequency: str = "none"  # "none", "daily", "weekly", "monthly"
     playlist_length: int = 25  # Number of tracks to include
@@ -30,6 +32,22 @@ class CreateGenrePlaylistRequest(BaseModel):
     artist_concentration: float = 0.35  # 0=more artists, 1=allow repeats
     album_concentration: float = 0.25
     llm_polish: bool = True
+
+
+class MetaGenreGroup(BaseModel):
+    meta_genre: str
+    genres: List[str]
+    total_song_count: int = 0
+
+
+class MetaGenreResponse(BaseModel):
+    source_key: str
+    generated_at: str
+    raw_genre_count: int
+    source_hash: str
+    model_name: Optional[str] = None
+    stale: bool = False
+    groups: List[MetaGenreGroup] = []
 
 class SuggestedMissingTrack(BaseModel):
     """A track suggested by AI that is not in the library"""

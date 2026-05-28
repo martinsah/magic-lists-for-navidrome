@@ -1,8 +1,11 @@
 // Global state for artist selection
 let selectedArtistId = null;
 let selectedGenre = null;
+let selectedMetaGenre = null;
+let genreSelectionMode = 'raw';
 let allArtists = [];
 let allGenres = [];
+let allMetaGenres = [];
 let currentToast = null;
 
 // Global state for library selection
@@ -337,9 +340,15 @@ document.addEventListener('DOMContentLoaded', function() {
         radio.addEventListener('change', () => {
             if (selectedLibraryIds.length > 0) {
                 loadGenres();
+                loadMetaGenres();
             }
         });
     });
+
+    document.querySelectorAll('input[name="genre-selection-mode"]').forEach(radio => {
+        radio.addEventListener('change', handleGenreSelectionModeChange);
+    });
+    handleGenreSelectionModeChange();
 
     // Load libraries on page load
     loadLibraries();
@@ -413,6 +422,35 @@ function getGenreMinSongCount() {
     return selected ? parseInt(selected.value, 10) : 25;
 }
 
+function getGenreSelectionMode() {
+    const selected = document.querySelector('input[name="genre-selection-mode"]:checked');
+    return selected ? selected.value : 'raw';
+}
+
+function updateGenreSubmitEnabled() {
+    const submitBtn = document.getElementById('create-genre-playlist-btn');
+    if (!submitBtn) return;
+    if (genreSelectionMode === 'meta') {
+        submitBtn.disabled = !selectedMetaGenre;
+    } else {
+        submitBtn.disabled = !selectedGenre;
+    }
+}
+
+function handleGenreSelectionModeChange() {
+    genreSelectionMode = getGenreSelectionMode();
+    const rawWrap = document.getElementById('raw-genre-select-wrap');
+    const metaWrap = document.getElementById('meta-genre-select-wrap');
+
+    if (rawWrap) rawWrap.classList.toggle('hidden', genreSelectionMode !== 'raw');
+    if (metaWrap) metaWrap.classList.toggle('hidden', genreSelectionMode !== 'meta');
+
+    if (genreSelectionMode === 'meta' && selectedLibraryIds.length > 0) {
+        loadMetaGenres();
+    }
+    updateGenreSubmitEnabled();
+}
+
 async function loadGenres() {
     try {
         const params = [`min_song_count=${getGenreMinSongCount()}`];
@@ -456,10 +494,7 @@ async function loadGenres() {
 
         // Clear any previous selection
         selectedGenre = null;
-        const submitBtn = document.getElementById('create-genre-playlist-btn');
-        if (submitBtn) {
-            submitBtn.disabled = true;
-        }
+        updateGenreSubmitEnabled();
 
         // Populate the select dropdown
         if (genreSelect) {
@@ -494,16 +529,56 @@ async function loadGenres() {
     }
 }
 
+async function loadMetaGenres() {
+    try {
+        const params = [`min_song_count=${getGenreMinSongCount()}`];
+        if (selectedLibraryIds.length > 0) {
+            selectedLibraryIds.forEach(id => {
+                params.push(`library_id=${encodeURIComponent(id)}`);
+            });
+        }
+        const response = await fetch(`/api/genres/meta?${params.join('&')}`);
+        if (!response.ok) {
+            throw new Error('Failed to fetch meta genres');
+        }
+        const data = await response.json();
+        allMetaGenres = data.groups || [];
+
+        const metaSelect = document.getElementById('meta-genre-select');
+        if (!metaSelect) return;
+
+        selectedMetaGenre = null;
+        metaSelect.value = '';
+        while (metaSelect.options.length > 1) {
+            metaSelect.remove(1);
+        }
+        allMetaGenres.forEach(group => {
+            const option = document.createElement('option');
+            option.value = group.meta_genre;
+            option.textContent = `${group.meta_genre} (${group.genres.length} genres, ${group.total_song_count} tracks)`;
+            metaSelect.appendChild(option);
+        });
+
+        if (!metaSelect.dataset.changeListenerAttached) {
+            metaSelect.addEventListener('change', handleMetaGenreSelection);
+            metaSelect.dataset.changeListenerAttached = 'true';
+        }
+        updateGenreSubmitEnabled();
+    } catch (error) {
+        console.error('Error loading meta genres:', error);
+        showToast('error', 'Failed to load distilled meta-genres');
+    }
+}
+
 // Handle genre selection change
 function handleGenreSelection(e) {
     selectedGenre = e.target.value;
-    const submitBtn = document.getElementById('create-genre-playlist-btn');
+    updateGenreSubmitEnabled();
+}
 
-    if (selectedGenre) {
-        submitBtn.disabled = false;
-    } else {
-        submitBtn.disabled = true;
-    }
+function handleMetaGenreSelection(e) {
+    selectedMetaGenre = e.target.value;
+    updateGenreSubmitEnabled();
 }
 
 // Load libraries and populate the multi-select interface
@@ -763,6 +838,7 @@ function handleLibraryCheckboxChange(e) {
         loadArtists();
     } else if (currentPage === 'genre-mix') {
         loadGenres();
+        loadMetaGenres();
     }
 
     console.log(`📚 Library selection updated:`, selectedLibraryIds);
@@ -879,8 +955,14 @@ async function createArtistPlaylist() {
 
 async function createGenrePlaylist() {
     const submitBtn = document.getElementById('create-genre-playlist-btn');
+    const mode = getGenreSelectionMode();
 
-    if (!selectedGenre) {
+    if (mode === 'meta') {
+        if (!selectedMetaGenre) {
+            showToast('error', 'Please select a meta-genre first');
+            return;
+        }
+    } else if (!selectedGenre) {
         showToast('error', 'Please select a genre first');
         return;
     }
@@ -906,7 +988,9 @@ async function createGenrePlaylist() {
                 'Content-Type': 'application/json'
             },
             body: JSON.stringify({
-                genre: selectedGenre,
+                genre: mode === 'raw' ? selectedGenre : null,
+                meta_genre: mode === 'meta' ? selectedMetaGenre : null,
+                genre_selection_mode: mode,
                 refresh_frequency: refreshFrequency,
                 playlist_length: parseInt(playlistLength),
                 library_ids: selectedLibraryIds,
@@ -929,7 +1013,7 @@ async function createGenrePlaylist() {
             window.rybbit.event('Genre Mix Playlist Created', {
                 trackCount: data.songs ? data.songs.length : 0,
                 refreshFrequency: refreshFrequency,
-                genre: selectedGenre,
+                genre: mode === 'meta' ? selectedMetaGenre : selectedGenre,
                 aiModel: modelInfo.model,
                 aiProvider: modelInfo.provider
             });
