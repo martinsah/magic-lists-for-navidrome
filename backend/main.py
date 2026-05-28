@@ -49,7 +49,11 @@ from .schemas import CreatePlaylistRequest, CreateGenrePlaylistRequest, Playlist
 from .recipe_manager import recipe_manager
 from .rediscover import RediscoverWeekly, ReDiscoverV2Processor
 from .track_scoring import filter_tracks_for_this_is_playlist
-from .curation_strategy import SCORING_VERSION, assemble_playlist_candidates
+from .curation_strategy import (
+    SCORING_VERSION,
+    assemble_playlist_candidates,
+    build_genre_mix_llm_pool,
+)
 from .suggestion_service import (
     process_playlist_suggestions,
     unpack_curation_result,
@@ -331,6 +335,12 @@ async def _build_or_refresh_meta_genres(
     raw_genres = await nav_client.get_genres(library_ids)
     if min_song_count > 0:
         raw_genres = [g for g in raw_genres if int(g.get("songCount", 0)) >= min_song_count]
+    scheduler_logger.info(
+        "🧠 Meta-genre distillation request: source_key=%s, raw_genres=%s, force=%s",
+        source_key,
+        len(raw_genres),
+        force,
+    )
     source_hash = distillation_service.source_hash(raw_genres)
 
     snapshot = await db.get_meta_genre_snapshot(source_key)
@@ -363,7 +373,39 @@ async def _build_or_refresh_meta_genres(
         "groups": distilled.get("groups", []),
         "generated_at": distilled.get("generated_at") or datetime.now().isoformat(),
         "raw_genre_count": distilled.get("raw_genre_count", len(raw_genres)),
+        "diagnostics": distilled.get("diagnostics", {}),
     }
+
+    new_groups = payload.get("groups") or []
+    new_singleton_ratio = (
+        sum(1 for group in new_groups if len(group.get("genres") or []) <= 1) / len(new_groups)
+        if new_groups else 0.0
+    )
+    if snapshot and new_groups:
+        previous_payload = snapshot.get("payload") or {}
+        previous_groups = previous_payload.get("groups") or []
+        previous_ratio = (
+            sum(1 for group in previous_groups if len(group.get("genres") or []) <= 1) / len(previous_groups)
+            if previous_groups else 1.0
+        )
+        if new_singleton_ratio >= 0.95 and previous_ratio < 0.95:
+            scheduler_logger.warning(
+                "⚠️ Rejecting degraded meta-genre snapshot for %s: new singleton ratio %.2f > previous %.2f",
+                source_key,
+                new_singleton_ratio,
+                previous_ratio,
+            )
+            preserved = previous_payload
+            preserved["stale"] = False
+            preserved["source_hash"] = snapshot.get("source_hash")
+            preserved["source_key"] = source_key
+            preserved["model_name"] = snapshot.get("model_name")
+            diagnostics = preserved.get("diagnostics") or {}
+            diagnostics["degraded_snapshot_rejected"] = True
+            diagnostics["rejected_singleton_ratio"] = new_singleton_ratio
+            diagnostics["previous_singleton_ratio"] = previous_ratio
+            preserved["diagnostics"] = diagnostics
+            return preserved
 
     await db.upsert_meta_genre_snapshot(
         source_key=source_key,
@@ -377,6 +419,18 @@ async def _build_or_refresh_meta_genres(
     payload["source_key"] = source_key
     payload["model_name"] = distilled.get("model_name")
     payload["stale"] = False
+    payload["diagnostics"] = distilled.get("diagnostics", {})
+    scheduler_logger.info(
+        "🧠 Meta-genre snapshot updated: source_key=%s, groups=%s, singleton_ratio=%.2f, fallback=%s",
+        source_key,
+        len(payload.get("groups") or []),
+        (
+            sum(1 for group in (payload.get("groups") or []) if len(group.get("genres") or []) <= 1)
+            / len(payload.get("groups") or [])
+            if payload.get("groups") else 0.0
+        ),
+        bool((payload.get("diagnostics") or {}).get("fallback_used")),
+    )
     return payload
 
 @app.get("/", response_class=HTMLResponse)
@@ -465,6 +519,11 @@ async def refresh_meta_genres(
 ):
     """Manually refresh distilled meta-genre cache."""
     try:
+        scheduler_logger.info(
+            "🧪 Manual meta-genre refresh requested: library_ids=%s, min_song_count=%s",
+            library_id,
+            min_song_count,
+        )
         payload = await _build_or_refresh_meta_genres(
             db=db,
             library_ids=library_id,
@@ -472,8 +531,10 @@ async def refresh_meta_genres(
             force=True,
         )
         await db.set_config("meta_genre_last_refresh_at", datetime.now().isoformat())
+        scheduler_logger.info("✅ Manual meta-genre refresh completed for source_key=%s", payload.get("source_key"))
         return payload
     except Exception as e:
+        scheduler_logger.error("❌ Manual meta-genre refresh failed: %s", e)
         raise HTTPException(status_code=500, detail=f"Failed to refresh meta genres: {str(e)}")
 
 
@@ -494,6 +555,7 @@ async def get_meta_genre_insights(
     model_name = None
     raw_genre_count = 0
     stale = True
+    diagnostics: Dict[str, Any] = {}
     if snapshot:
         payload = snapshot.get("payload") or {}
         groups = payload.get("groups") or []
@@ -501,7 +563,21 @@ async def get_meta_genre_insights(
         source_hash = snapshot.get("source_hash")
         model_name = snapshot.get("model_name")
         raw_genre_count = int(payload.get("raw_genre_count") or snapshot.get("raw_genre_count") or 0)
+        diagnostics = payload.get("diagnostics") or {}
         stale = await db.is_meta_genre_snapshot_stale(source_key, int(settings["cache_hours"]))
+        if not diagnostics:
+            legacy_total_groups = len(groups)
+            legacy_singleton_ratio = (
+                sum(1 for group in groups if len(group.get("genres") or []) <= 1) / legacy_total_groups
+                if legacy_total_groups else 0.0
+            )
+            diagnostics = {
+                "llm_attempted": model_name is not None,
+                "provider_available": model_name is not None,
+                "fallback_used": legacy_singleton_ratio >= 0.95 if legacy_total_groups else False,
+                "fallback_reason": "legacy_snapshot_without_diagnostics",
+                "raw_genre_count": raw_genre_count,
+            }
 
     total_groups = len(groups)
     singleton_groups = sum(1 for group in groups if len(group.get("genres") or []) <= 1)
@@ -540,6 +616,7 @@ async def get_meta_genre_insights(
             cache_hours=int(settings["cache_hours"]),
         ),
         groups=groups,
+        diagnostics=diagnostics,
     )
 
 
@@ -938,12 +1015,19 @@ async def create_genre_playlist(
             f"(artist cap: {assembly_metadata['artist_cap']}, album cap: {assembly_metadata['album_cap']})"
         )
 
-        selected_tracks = []
-        for track in assembly["selected_tracks"]:
-            annotated = dict(track)
-            annotated["_heuristic_seed"] = True
-            selected_tracks.append(annotated)
-        tracks_for_llm = selected_tracks + assembly["reserve_tracks"]
+        llm_pool_meta: Dict[str, int] = {}
+        tracks_for_llm, llm_pool_meta = build_genre_mix_llm_pool(
+            assembly, request.playlist_length
+        )
+        if llm_pool_meta.get("llm_pool_count", 0) < (
+            len(assembly["selected_tracks"]) + len(assembly.get("reserve_tracks") or [])
+        ):
+            scheduler_logger.info(
+                "🎯 Genre mix LLM pool capped: "
+                f"{llm_pool_meta.get('llm_seed_count', 0)} seeds + "
+                f"{llm_pool_meta.get('llm_reserve_count', 0)} reserves "
+                f"(cap {llm_pool_meta.get('llm_pool_cap', 0)})"
+            )
 
         if request.llm_polish:
             # Use AI as a polish/repair pass over the deterministic draft and reserves.
@@ -1888,13 +1972,14 @@ async def refresh_genre_mix_playlist(scheduled_playlist, db: DatabaseManager):
             f"(artist cap: {assembly_metadata['artist_cap']}, album cap: {assembly_metadata['album_cap']})"
         )
 
-        selected_tracks = []
-        for track in assembly["selected_tracks"]:
-            annotated = dict(track)
-            annotated["_heuristic_seed"] = True
-            selected_tracks.append(annotated)
-        tracks_for_llm = selected_tracks + assembly["reserve_tracks"]
+        tracks_for_llm, llm_pool_meta = build_genre_mix_llm_pool(assembly, original_length)
         if llm_polish:
+            scheduler_logger.info(
+                "🎯 Genre mix refresh LLM pool: "
+                f"{llm_pool_meta.get('llm_seed_count', 0)} seeds + "
+                f"{llm_pool_meta.get('llm_reserve_count', 0)} reserves "
+                f"(cap {llm_pool_meta.get('llm_pool_cap', 0)})"
+            )
             curation_result = await ai_client_instance.curate_genre_mix(
                 genre=selected_label,
                 tracks_json=tracks_for_llm,

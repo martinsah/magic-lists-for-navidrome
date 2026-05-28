@@ -180,5 +180,43 @@ def assemble_playlist_candidates(
     }
 
 
+def genre_mix_llm_pool_cap(target_size: int) -> int:
+    """Max tracks sent to the LLM: draft plus a small reserve swap pool."""
+    reserve_slots = min(20, max(10, target_size // 3))
+    return target_size + reserve_slots
+
+
+def build_genre_mix_llm_pool(
+    assembly: Dict[str, Any],
+    target_size: int,
+) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    """
+    Build the capped candidate list for Genre Mix LLM polish.
+
+    Returns annotated tracks (heuristic seeds marked) and counts for logging.
+    """
+    cap = genre_mix_llm_pool_cap(target_size)
+    selected = assembly["selected_tracks"][:target_size]
+    reserves = assembly.get("reserve_tracks") or []
+
+    pool: List[Dict[str, Any]] = []
+    for track in selected:
+        annotated = dict(track)
+        annotated["_heuristic_seed"] = True
+        pool.append(annotated)
+
+    reserve_slots = max(0, cap - len(pool))
+    if reserve_slots > 0:
+        pool.extend(reserves[:reserve_slots])
+
+    metadata = {
+        "llm_pool_cap": cap,
+        "llm_pool_count": len(pool),
+        "llm_seed_count": len(selected),
+        "llm_reserve_count": min(reserve_slots, len(reserves)),
+    }
+    return pool, metadata
+
+
 def serialize_score_params(params: Dict[str, Any]) -> str:
     return json.dumps(params, sort_keys=True, separators=(",", ":"))
