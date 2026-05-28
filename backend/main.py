@@ -45,7 +45,7 @@ logging.getLogger('httpcore').setLevel(logging.WARNING)
 from .navidrome_client import NavidromeClient
 from .ai_client import AIClient
 from .database import DatabaseManager, get_db
-from .schemas import CreatePlaylistRequest, CreateGenrePlaylistRequest, Playlist, RediscoverWeeklyResponse, RediscoverWeeklyV2Response, CreateRediscoverPlaylistRequest, PlaylistWithScheduleInfo, LidarrAddRequest, LidarrBulkAddRequest, PlaylistSettingsRequest, ScheduledPlaylist, MetaGenreResponse
+from .schemas import CreatePlaylistRequest, CreateGenrePlaylistRequest, Playlist, RediscoverWeeklyResponse, RediscoverWeeklyV2Response, CreateRediscoverPlaylistRequest, PlaylistWithScheduleInfo, LidarrAddRequest, LidarrBulkAddRequest, PlaylistSettingsRequest, ScheduledPlaylist, MetaGenreResponse, MetaGenreInsightsResponse, MetaGenreSettingsRequest, MetaGenreSettingsResponse
 from .recipe_manager import recipe_manager
 from .rediscover import RediscoverWeekly, ReDiscoverV2Processor
 from .track_scoring import filter_tracks_for_this_is_playlist
@@ -245,17 +245,88 @@ def _meta_refresh_due(last_refreshed_iso: Optional[str], frequency: str) -> bool
     return False
 
 
+def _normalize_meta_frequency(value: Optional[str]) -> str:
+    normalized = (value or "weekly").strip().lower()
+    if normalized not in {"none", "daily", "weekly", "monthly"}:
+        return "weekly"
+    return normalized
+
+
+def _safe_int(value: Optional[str], default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value) if value is not None else default
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(maximum, parsed))
+
+
+async def _get_effective_meta_genre_settings(db: DatabaseManager) -> Dict[str, int | str]:
+    refresh_frequency = _normalize_meta_frequency(
+        await db.get_config("meta_genre_refresh_frequency")
+        or os.getenv("META_GENRE_REFRESH_FREQUENCY", "weekly")
+    )
+    min_song_count = _safe_int(
+        await db.get_config("meta_genre_min_song_count")
+        or os.getenv("META_GENRE_MIN_SONG_COUNT", "0"),
+        default=0,
+        minimum=0,
+        maximum=20000,
+    )
+    min_raw_genres = _safe_int(
+        await db.get_config("meta_genre_min_raw_genres")
+        or os.getenv("META_GENRE_MIN_RAW_GENRES", "30"),
+        default=30,
+        minimum=1,
+        maximum=5000,
+    )
+    cache_hours = _safe_int(
+        await db.get_config("meta_genre_cache_hours")
+        or os.getenv("META_GENRE_CACHE_HOURS", "168"),
+        default=168,
+        minimum=1,
+        maximum=24 * 365,
+    )
+    return {
+        "refresh_frequency": refresh_frequency,
+        "min_song_count": min_song_count,
+        "min_raw_genres": min_raw_genres,
+        "cache_hours": cache_hours,
+    }
+
+
+async def _set_meta_genre_settings(db: DatabaseManager, request: MetaGenreSettingsRequest) -> MetaGenreSettingsResponse:
+    refresh_frequency = _normalize_meta_frequency(request.refresh_frequency)
+    min_song_count = _safe_int(str(request.min_song_count), default=0, minimum=0, maximum=20000)
+    min_raw_genres = _safe_int(str(request.min_raw_genres), default=30, minimum=1, maximum=5000)
+    cache_hours = _safe_int(str(request.cache_hours), default=168, minimum=1, maximum=24 * 365)
+
+    await db.set_config("meta_genre_refresh_frequency", refresh_frequency)
+    await db.set_config("meta_genre_min_song_count", str(min_song_count))
+    await db.set_config("meta_genre_min_raw_genres", str(min_raw_genres))
+    await db.set_config("meta_genre_cache_hours", str(cache_hours))
+
+    return MetaGenreSettingsResponse(
+        refresh_frequency=refresh_frequency,
+        min_song_count=min_song_count,
+        min_raw_genres=min_raw_genres,
+        cache_hours=cache_hours,
+    )
+
+
 async def _build_or_refresh_meta_genres(
     db: DatabaseManager,
     library_ids: Optional[List[str]],
     min_song_count: int,
     force: bool = False,
+    min_raw_genres_override: Optional[int] = None,
+    cache_hours_override: Optional[int] = None,
 ) -> Dict[str, Any]:
     nav_client = get_navidrome_client()
     distillation_service = get_genre_distillation_service()
     source_key = _meta_genre_source_key(library_ids, min_song_count)
-    cache_hours = int(os.getenv("META_GENRE_CACHE_HOURS", "168"))
-    min_raw_genres = int(os.getenv("META_GENRE_MIN_RAW_GENRES", "30"))
+    settings = await _get_effective_meta_genre_settings(db)
+    cache_hours = int(cache_hours_override if cache_hours_override is not None else settings["cache_hours"])
+    min_raw_genres = int(min_raw_genres_override if min_raw_genres_override is not None else settings["min_raw_genres"])
 
     raw_genres = await nav_client.get_genres(library_ids)
     if min_song_count > 0:
@@ -404,6 +475,81 @@ async def refresh_meta_genres(
         return payload
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to refresh meta genres: {str(e)}")
+
+
+@app.get("/api/genres/meta/insights", response_model=MetaGenreInsightsResponse)
+async def get_meta_genre_insights(
+    db: DatabaseManager = Depends(get_db),
+    library_id: List[str] = Query(None),
+):
+    """Return snapshot + cadence insights for meta-genre distillation."""
+    settings = await _get_effective_meta_genre_settings(db)
+    source_key = _meta_genre_source_key(library_id, int(settings["min_song_count"]))
+    snapshot = await db.get_meta_genre_snapshot(source_key)
+    last_refresh_at = await db.get_config("meta_genre_last_refresh_at")
+
+    groups = []
+    generated_at = None
+    source_hash = None
+    model_name = None
+    raw_genre_count = 0
+    stale = True
+    if snapshot:
+        payload = snapshot.get("payload") or {}
+        groups = payload.get("groups") or []
+        generated_at = payload.get("generated_at") or snapshot.get("generated_at")
+        source_hash = snapshot.get("source_hash")
+        model_name = snapshot.get("model_name")
+        raw_genre_count = int(payload.get("raw_genre_count") or snapshot.get("raw_genre_count") or 0)
+        stale = await db.is_meta_genre_snapshot_stale(source_key, int(settings["cache_hours"]))
+
+    total_groups = len(groups)
+    singleton_groups = sum(1 for group in groups if len(group.get("genres") or []) <= 1)
+    singleton_ratio = (singleton_groups / total_groups) if total_groups else 0.0
+
+    next_refresh_at = None
+    refresh_frequency = str(settings["refresh_frequency"])
+    if refresh_frequency != "none" and last_refresh_at:
+        try:
+            last = datetime.fromisoformat(last_refresh_at)
+            if refresh_frequency == "daily":
+                next_refresh_at = (last + timedelta(days=1)).isoformat()
+            elif refresh_frequency == "weekly":
+                next_refresh_at = (last + timedelta(days=7)).isoformat()
+            elif refresh_frequency == "monthly":
+                next_refresh_at = (last + timedelta(days=30)).isoformat()
+        except ValueError:
+            next_refresh_at = None
+
+    return MetaGenreInsightsResponse(
+        source_key=source_key,
+        generated_at=generated_at,
+        last_refresh_at=last_refresh_at,
+        next_refresh_at=next_refresh_at,
+        raw_genre_count=raw_genre_count,
+        source_hash=source_hash,
+        model_name=model_name,
+        stale=stale,
+        total_groups=total_groups,
+        singleton_groups=singleton_groups,
+        singleton_ratio=singleton_ratio,
+        settings=MetaGenreSettingsResponse(
+            refresh_frequency=refresh_frequency,
+            min_song_count=int(settings["min_song_count"]),
+            min_raw_genres=int(settings["min_raw_genres"]),
+            cache_hours=int(settings["cache_hours"]),
+        ),
+        groups=groups,
+    )
+
+
+@app.patch("/api/genres/meta/settings", response_model=MetaGenreSettingsResponse)
+async def update_meta_genre_settings(
+    request: MetaGenreSettingsRequest,
+    db: DatabaseManager = Depends(get_db),
+):
+    """Persist user-tunable meta-genre cadence/threshold settings."""
+    return await _set_meta_genre_settings(db, request)
 
 
 @app.get("/api/music-folders")
@@ -723,7 +869,8 @@ async def create_genre_playlist(
             if not request.meta_genre:
                 raise HTTPException(status_code=400, detail="meta_genre is required when genre_selection_mode='meta'")
             selected_genre_label = request.meta_genre
-            min_song_count = int(os.getenv("META_GENRE_MIN_SONG_COUNT", "0"))
+            meta_settings = await _get_effective_meta_genre_settings(db)
+            min_song_count = int(meta_settings["min_song_count"])
             source_key = _meta_genre_source_key(request.library_ids, min_song_count)
             snapshot = await db.get_meta_genre_snapshot(source_key)
             if not snapshot:
@@ -732,6 +879,8 @@ async def create_genre_playlist(
                     library_ids=request.library_ids,
                     min_song_count=min_song_count,
                     force=True,
+                    min_raw_genres_override=int(meta_settings["min_raw_genres"]),
+                    cache_hours_override=int(meta_settings["cache_hours"]),
                 )
                 snapshot = await db.get_meta_genre_snapshot(source_key)
             source_genres = get_genre_distillation_service().resolve_meta_genre(request.meta_genre, snapshot)
@@ -1335,7 +1484,8 @@ def schedule_playlist_refresh():
 
 async def maybe_refresh_meta_genres(db: DatabaseManager):
     """Periodically refresh distilled meta-genre cache based on configured cadence."""
-    frequency = os.getenv("META_GENRE_REFRESH_FREQUENCY", "weekly").lower()
+    settings = await _get_effective_meta_genre_settings(db)
+    frequency = str(settings["refresh_frequency"])
     if frequency == "none":
         return
 
@@ -1343,13 +1493,15 @@ async def maybe_refresh_meta_genres(db: DatabaseManager):
     if not _meta_refresh_due(last_refreshed, frequency):
         return
 
-    min_song_count = int(os.getenv("META_GENRE_MIN_SONG_COUNT", "0"))
+    min_song_count = int(settings["min_song_count"])
     try:
         await _build_or_refresh_meta_genres(
             db=db,
             library_ids=None,
             min_song_count=min_song_count,
             force=True,
+            min_raw_genres_override=int(settings["min_raw_genres"]),
+            cache_hours_override=int(settings["cache_hours"]),
         )
         await db.set_config("meta_genre_last_refresh_at", datetime.now().isoformat())
         scheduler_logger.info("✅ Refreshed meta-genre distillation cache")
@@ -2173,7 +2325,7 @@ async def track_library_size(db: DatabaseManager = Depends(get_db)):
 async def spa_router(request: Request, path: str):
     """Handle SPA routing - serve app for known paths, redirect unknown paths"""
     # Known SPA paths - serve the app and let frontend handle routing
-    spa_paths = ["this-is", "re-discover", "genre-mix", "playlists", "system-check"]
+    spa_paths = ["this-is", "re-discover", "genre-mix", "playlists", "genre-insights", "system-check"]
     
     if path in spa_paths:
         # Apply same system check logic as root

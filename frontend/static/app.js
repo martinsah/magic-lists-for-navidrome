@@ -7,6 +7,7 @@ let allArtists = [];
 let allGenres = [];
 let allMetaGenres = [];
 let currentToast = null;
+let latestMetaInsights = null;
 
 // Global state for library selection
 let selectedLibraryIds = [];
@@ -193,7 +194,7 @@ function setActiveMenuItem(page) {
 // Navigation functionality
 function showContent(contentId) {
     // Hide all content sections
-    const contentSections = ['welcome-content', 'this-is-content', 'rediscover-content', 'genre-mix-content', 'manage-playlists-content', 'system-check-content'];
+    const contentSections = ['welcome-content', 'this-is-content', 'rediscover-content', 'genre-mix-content', 'manage-playlists-content', 'genre-insights-content', 'system-check-content'];
     contentSections.forEach(id => {
         const element = document.getElementById(id);
         if (element) {
@@ -349,6 +350,15 @@ document.addEventListener('DOMContentLoaded', function() {
         radio.addEventListener('change', handleGenreSelectionModeChange);
     });
     handleGenreSelectionModeChange();
+
+    const refreshMetaBtn = document.getElementById('refresh-meta-genres-btn');
+    if (refreshMetaBtn) {
+        refreshMetaBtn.addEventListener('click', refreshMetaGenresNow);
+    }
+    const saveMetaSettingsBtn = document.getElementById('save-meta-settings-btn');
+    if (saveMetaSettingsBtn) {
+        saveMetaSettingsBtn.addEventListener('click', saveMetaGenreSettings);
+    }
 
     // Load libraries on page load
     loadLibraries();
@@ -567,6 +577,133 @@ async function loadMetaGenres() {
     } catch (error) {
         console.error('Error loading meta genres:', error);
         showToast('error', 'Failed to load distilled meta-genres');
+    }
+}
+
+async function loadGenreInsights() {
+    try {
+        const params = [];
+        if (selectedLibraryIds.length > 0) {
+            selectedLibraryIds.forEach(id => params.push(`library_id=${encodeURIComponent(id)}`));
+        }
+        const query = params.length > 0 ? `?${params.join('&')}` : '';
+        const response = await fetch(`/api/genres/meta/insights${query}`);
+        if (!response.ok) {
+            throw new Error('Failed to load genre insights');
+        }
+        latestMetaInsights = await response.json();
+        renderGenreInsights(latestMetaInsights);
+    } catch (error) {
+        console.error('Error loading genre insights:', error);
+        showToast('error', 'Failed to load genre insights');
+    }
+}
+
+function renderGenreInsights(insights) {
+    const cards = document.getElementById('genre-insights-cards');
+    const groupsEl = document.getElementById('genre-insights-groups');
+    const warningEl = document.getElementById('genre-insights-warning');
+    if (!cards || !groupsEl || !warningEl) return;
+
+    const settings = insights.settings || {};
+    const values = [
+        ['Last Generated', formatDisplayDate(insights.generated_at)],
+        ['Last Refresh', formatDisplayDate(insights.last_refresh_at)],
+        ['Next Refresh', formatDisplayDate(insights.next_refresh_at)],
+        ['Model', insights.model_name || 'Fallback/None'],
+        ['Raw Genres', String(insights.raw_genre_count || 0)],
+        ['Meta Groups', String(insights.total_groups || 0)],
+        ['Singleton Groups', String(insights.singleton_groups || 0)],
+        ['Stale', insights.stale ? 'Yes' : 'No'],
+    ];
+    cards.innerHTML = values.map(([label, value]) => `
+        <div class="border border-gray-200 rounded-lg p-3 bg-gray-50">
+            <div class="text-xs uppercase tracking-wide text-gray-500 mb-1">${label}</div>
+            <div class="text-sm font-semibold text-gray-900 break-all">${value}</div>
+        </div>
+    `).join('');
+
+    document.getElementById('meta-refresh-frequency').value = settings.refresh_frequency || 'weekly';
+    document.getElementById('meta-min-song-count').value = settings.min_song_count ?? 0;
+    document.getElementById('meta-min-raw-genres').value = settings.min_raw_genres ?? 30;
+    document.getElementById('meta-cache-hours').value = settings.cache_hours ?? 168;
+
+    const singletonRatio = insights.singleton_ratio || 0;
+    if (singletonRatio >= 0.7 && (insights.total_groups || 0) > 0) {
+        warningEl.classList.remove('hidden');
+        warningEl.textContent = `Warning: ${(singletonRatio * 100).toFixed(0)}% of groups are singletons. This can indicate fallback grouping or weak distillation output.`;
+    } else {
+        warningEl.classList.add('hidden');
+        warningEl.textContent = '';
+    }
+
+    const groups = insights.groups || [];
+    if (groups.length === 0) {
+        groupsEl.innerHTML = '<div class="text-sm text-gray-500 p-3 bg-gray-50 rounded-lg">No distillation snapshot yet. Click \"Refresh Meta-Genres Now\" to create one.</div>';
+        return;
+    }
+    groupsEl.innerHTML = groups.map(group => `
+        <div class="border border-gray-200 rounded-lg p-3">
+            <div class="flex items-center justify-between gap-3">
+                <div class="font-medium text-gray-900">${group.meta_genre}</div>
+                <div class="text-xs text-gray-500">${(group.genres || []).length} genres • ${group.total_song_count || 0} tracks</div>
+            </div>
+            <div class="text-xs text-gray-600 mt-2">${(group.genres || []).join(', ')}</div>
+        </div>
+    `).join('');
+}
+
+async function refreshMetaGenresNow() {
+    const button = document.getElementById('refresh-meta-genres-btn');
+    if (button) button.disabled = true;
+    try {
+        const configuredMinSongCount = parseInt(document.getElementById('meta-min-song-count')?.value || '0', 10);
+        const params = [`min_song_count=${Number.isNaN(configuredMinSongCount) ? 0 : configuredMinSongCount}`];
+        if (selectedLibraryIds.length > 0) {
+            selectedLibraryIds.forEach(id => params.push(`library_id=${encodeURIComponent(id)}`));
+        }
+        const response = await fetch(`/api/genres/meta/refresh?${params.join('&')}`, { method: 'POST' });
+        if (!response.ok) {
+            const errorData = await response.json().catch(() => ({ detail: 'Failed to refresh meta genres' }));
+            throw new Error(errorData.detail || 'Failed to refresh meta genres');
+        }
+        showToast('success', 'Meta-genres refreshed');
+        await loadMetaGenres();
+        await loadGenreInsights();
+    } catch (error) {
+        console.error('Error refreshing meta-genres:', error);
+        showToast('error', error.message);
+    } finally {
+        if (button) button.disabled = false;
+    }
+}
+
+async function saveMetaGenreSettings() {
+    const button = document.getElementById('save-meta-settings-btn');
+    if (button) button.disabled = true;
+    try {
+        const payload = {
+            refresh_frequency: document.getElementById('meta-refresh-frequency').value,
+            min_song_count: parseInt(document.getElementById('meta-min-song-count').value || '0', 10),
+            min_raw_genres: parseInt(document.getElementById('meta-min-raw-genres').value || '30', 10),
+            cache_hours: parseInt(document.getElementById('meta-cache-hours').value || '168', 10),
+        };
+        const response = await fetch('/api/genres/meta/settings', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        if (!response.ok) {
+            const errorData = await response.json().catch(() => ({ detail: 'Failed to save settings' }));
+            throw new Error(errorData.detail || 'Failed to save settings');
+        }
+        showToast('success', 'Distillation settings updated');
+        await loadGenreInsights();
+    } catch (error) {
+        console.error('Error saving meta-genre settings:', error);
+        showToast('error', error.message);
+    } finally {
+        if (button) button.disabled = false;
     }
 }
 
@@ -839,6 +976,8 @@ function handleLibraryCheckboxChange(e) {
     } else if (currentPage === 'genre-mix') {
         loadGenres();
         loadMetaGenres();
+    } else if (currentPage === 'genre-insights') {
+        loadGenreInsights();
     }
 
     console.log(`📚 Library selection updated:`, selectedLibraryIds);
@@ -2071,6 +2210,9 @@ function updateURL(page) {
         case 'playlists':
             url = '/playlists';
             break;
+        case 'genre-insights':
+            url = '/genre-insights';
+            break;
         case 'system-check':
             url = '/system-check';
             break;
@@ -2130,6 +2272,9 @@ function getPageFromURL(pathname) {
         case '/playlists':
             page = 'playlists';
             break;
+        case '/genre-insights':
+            page = 'genre-insights';
+            break;
         case '/system-check':
             page = 'system-check';
             break;
@@ -2163,12 +2308,18 @@ function handlePageNavigation(page) {
         contentId = 'genre-mix-content';
         // Load genres when navigating to Genre Mix page (only if libraries selected)
         if (selectedLibraryIds.length > 0) {
-            setTimeout(() => loadGenres(), 100);
+            setTimeout(() => {
+                loadGenres();
+                loadMetaGenres();
+            }, 100);
         }
     } else if (page === 'playlists') {
         contentId = 'manage-playlists-content';
         // Load playlists when navigating to manage page
         setTimeout(() => loadPlaylists(), 100);
+    } else if (page === 'genre-insights') {
+        contentId = 'genre-insights-content';
+        setTimeout(() => loadGenreInsights(), 100);
     } else if (page === 'system-check') {
         contentId = 'system-check-content';
         // Auto-run system checks when navigating to system check page

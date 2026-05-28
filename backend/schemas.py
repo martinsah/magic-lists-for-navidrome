@@ -49,6 +49,36 @@ class MetaGenreResponse(BaseModel):
     stale: bool = False
     groups: List[MetaGenreGroup] = []
 
+
+class MetaGenreSettingsRequest(BaseModel):
+    refresh_frequency: str = "weekly"  # none | daily | weekly | monthly
+    min_song_count: int = 0
+    min_raw_genres: int = 30
+    cache_hours: int = 168
+
+
+class MetaGenreSettingsResponse(BaseModel):
+    refresh_frequency: str
+    min_song_count: int
+    min_raw_genres: int
+    cache_hours: int
+
+
+class MetaGenreInsightsResponse(BaseModel):
+    source_key: str
+    generated_at: Optional[str] = None
+    last_refresh_at: Optional[str] = None
+    next_refresh_at: Optional[str] = None
+    raw_genre_count: int = 0
+    source_hash: Optional[str] = None
+    model_name: Optional[str] = None
+    stale: bool = True
+    total_groups: int = 0
+    singleton_groups: int = 0
+    singleton_ratio: float = 0.0
+    settings: MetaGenreSettingsResponse
+    groups: List[MetaGenreGroup] = []
+
 class SuggestedMissingTrack(BaseModel):
     """A track suggested by AI that is not in the library"""
     title: str
