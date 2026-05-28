@@ -18,7 +18,7 @@ class CreatePlaylistRequest(BaseModel):
     library_ids: List[str] = []  # List of library IDs to filter tracks
     artist_concentration: float = 0.8  # 0=diverse, 1=allow seed artist dominance
     album_concentration: float = 0.35
-    llm_polish: bool = True
+    llm_polish: bool = False
 
 class CreateGenrePlaylistRequest(BaseModel):
     """Request schema for creating a genre mix playlist"""
@@ -31,7 +31,7 @@ class CreateGenrePlaylistRequest(BaseModel):
     library_ids: List[str] = []  # List of library IDs to filter tracks
     artist_concentration: float = 0.35  # 0=more artists, 1=allow repeats
     album_concentration: float = 0.25
-    llm_polish: bool = True
+    llm_polish: bool = False
 
 
 class MetaGenreGroup(BaseModel):
@@ -48,6 +48,7 @@ class MetaGenreResponse(BaseModel):
     model_name: Optional[str] = None
     stale: bool = False
     groups: List[MetaGenreGroup] = []
+    diagnostics: Dict[str, Any] = {}
 
 
 class MetaGenreSettingsRequest(BaseModel):
@@ -78,6 +79,7 @@ class MetaGenreInsightsResponse(BaseModel):
     singleton_ratio: float = 0.0
     settings: MetaGenreSettingsResponse
     groups: List[MetaGenreGroup] = []
+    diagnostics: Dict[str, Any] = {}
 
 class SuggestedMissingTrack(BaseModel):
     """A track suggested by AI that is not in the library"""

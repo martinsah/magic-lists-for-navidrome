@@ -543,32 +543,13 @@
                      </div>
 
                      <form id="genre-mix-form" class="space-y-6">
-                         <!-- Genre size filter -->
-                         <div>
-                             <label class="block text-sm text-gray-900 font-bold mb-3">Minimum tracks per genre</label>
-                             <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
-                                 <div class="flex items-center">
-                                     <input type="radio" id="genre-min-1" name="genre-min-song-count" value="1" class="shrink-0 mt-0.5 border-gray-200 rounded-full text-blue-600 focus:ring-blue-500">
-                                     <label for="genre-min-1" class="text-sm text-gray-500 ms-2">1 or more</label>
-                                 </div>
-                                 <div class="flex items-center">
-                                     <input type="radio" id="genre-min-25" name="genre-min-song-count" value="25" checked class="shrink-0 mt-0.5 border-gray-200 rounded-full text-blue-600 focus:ring-blue-500">
-                                     <label for="genre-min-25" class="text-sm text-gray-500 ms-2">25 or more</label>
-                                 </div>
-                                 <div class="flex items-center">
-                                     <input type="radio" id="genre-min-100" name="genre-min-song-count" value="100" class="shrink-0 mt-0.5 border-gray-200 rounded-full text-blue-600 focus:ring-blue-500">
-                                     <label for="genre-min-100" class="text-sm text-gray-500 ms-2">100 or more</label>
-                                 </div>
-                                 <div class="flex items-center">
-                                     <input type="radio" id="genre-min-250" name="genre-min-song-count" value="250" class="shrink-0 mt-0.5 border-gray-200 rounded-full text-blue-600 focus:ring-blue-500">
-                                     <label for="genre-min-250" class="text-sm text-gray-500 ms-2">250 or more</label>
-                                 </div>
-                             </div>
-                         </div>
-
                          <!-- Genre Selection -->
                          <div>
                             <label class="block text-sm text-gray-900 font-bold mb-2">Selection Mode</label>
+                            <p class="text-sm text-gray-600 mb-3">
+                                <strong>Raw genres</strong> are the exact tags from your library (for example Rock, Jazz, Shoegaze).
+                                <strong>Meta-genres</strong> are broader groups distilled from many raw genres (for example Alternative &amp; Indie), so one meta-genre can cover several related styles.
+                            </p>
                             <div class="flex flex-wrap gap-4 mb-3">
                                 <label class="flex items-center text-sm text-gray-600">
                                     <input type="radio" name="genre-selection-mode" value="raw" checked class="shrink-0 mt-0.5 border-gray-200 rounded-full text-blue-600 focus:ring-blue-500">
@@ -580,7 +561,6 @@
                                 </label>
                             </div>
 
-                             <label for="genre-select" class="block text-sm text-gray-900 font-bold mb-2">Choose a genre from your library</label>
                             <div id="raw-genre-select-wrap" class="relative">
                                  <select
                                      id="genre-select"
@@ -598,15 +578,28 @@
                                      }'
                                      class="hidden"
                                  >
-                                     <option value="">Choose a genre</option>
+                                     <option value=""></option>
                                  </select>
                              </div>
-                            <div id="meta-genre-select-wrap" class="relative hidden mt-3">
-                                <label for="meta-genre-select" class="block text-sm text-gray-900 font-bold mb-2">Choose a meta-genre</label>
-                                <select id="meta-genre-select" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm bg-white text-gray-800">
-                                    <option value="">Choose a meta-genre</option>
+                            <div id="meta-genre-select-wrap" class="relative hidden">
+                                <select
+                                    id="meta-genre-select"
+                                    data-hs-select='{
+                                        "placeholder": "Search for a meta-genre...",
+                                        "toggleTag": "<button type=\"button\"></button>",
+                                        "toggleClasses": "hs-select-disabled:pointer-events-none hs-select-disabled:opacity-50 relative py-3 px-4 pe-9 flex text-nowrap w-full cursor-pointer bg-white border border-gray-200 rounded-lg text-start text-sm focus:border-blue-500 focus:ring-blue-500 before:absolute before:inset-0 before:z-[1]",
+                                        "dropdownClasses": "hs-select-dropdown mt-2 z-50 w-full max-h-72 p-1 space-y-0.5 bg-white border border-gray-200 rounded-lg overflow-hidden overflow-y-auto [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-track]:bg-gray-100 [&::-webkit-scrollbar-thumb]:bg-gray-300",
+                                        "optionClasses": "py-2 px-4 w-full text-sm text-gray-800 cursor-pointer hover:bg-gray-100 rounded-lg focus:outline-none focus:bg-gray-100",
+                                        "optionTemplate": "<div class=\"flex justify-between items-center w-full\"><span data-title></span><span class=\"hidden hs-selected:block\"><svg class=\"flex-shrink-0 size-3.5 text-blue-600\" xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><polyline points=\"20 6 9 17 4 12\"/></svg></span></div>",
+                                        "hasSearch": true,
+                                        "searchPlaceholder": "Search...",
+                                        "searchClasses": "block w-full text-sm border-gray-200 rounded-lg focus:border-blue-500 focus:ring-blue-500 before:absolute before:inset-0 before:z-[1] py-2 px-3",
+                                        "searchWrapperClasses": "bg-white p-2 -mx-1 sticky top-0"
+                                    }'
+                                    class="hidden"
+                                >
+                                    <option value=""></option>
                                 </select>
-                                <p id="meta-genre-hint" class="text-xs text-gray-500 mt-2">Meta-genres are distilled from your library and may combine multiple similar raw genres.</p>
                             </div>
                          </div>
 
@@ -678,8 +671,8 @@
                                     class="w-full accent-blue-600"
                                 >
                                 <label class="flex items-center gap-2 text-sm text-gray-600 mt-3">
-                                    <input id="genre-llm-polish" type="checkbox" checked class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
-                                    Let the LLM polish ordering and make small swaps
+                                    <input id="genre-llm-polish" type="checkbox" class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                                    Let the LLM polish ordering and make small swaps (uses API quota)
                                 </label>
                             </div>
                         </div>
@@ -736,6 +729,7 @@
 
                       <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 mb-6" id="genre-insights-cards"></div>
                       <div id="genre-insights-warning" class="hidden p-3 mb-6 text-amber-800 border border-amber-300 rounded-lg bg-amber-50 text-sm"></div>
+                      <div id="genre-insights-diagnostics" class="hidden p-3 mb-6 text-blue-800 border border-blue-300 rounded-lg bg-blue-50 text-sm whitespace-pre-wrap"></div>
 
                       <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
                           <div>
@@ -903,6 +897,6 @@
             </div>
         </div>
     </div>
-    <script src="/static/app.js?v=1.0.10"></script>
+    <script src="/static/app.js?v=1.0.15"></script>
 </body>
 </html>
