@@ -336,16 +336,6 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
     
-    // Reload genre list when minimum-track filter changes
-    document.querySelectorAll('input[name="genre-min-song-count"]').forEach(radio => {
-        radio.addEventListener('change', () => {
-            if (selectedLibraryIds.length > 0) {
-                loadGenres();
-                loadMetaGenres();
-            }
-        });
-    });
-
     document.querySelectorAll('input[name="genre-selection-mode"]').forEach(radio => {
         radio.addEventListener('change', handleGenreSelectionModeChange);
     });
@@ -427,14 +417,35 @@ async function loadArtists() {
     }
 }
 
-function getGenreMinSongCount() {
-    const selected = document.querySelector('input[name="genre-min-song-count"]:checked');
-    return selected ? parseInt(selected.value, 10) : 25;
-}
-
 function getGenreSelectionMode() {
     const selected = document.querySelector('input[name="genre-selection-mode"]:checked');
     return selected ? selected.value : 'raw';
+}
+
+function configureGenreHsSelect(selectEl, placeholder) {
+    if (!selectEl || !window.HSSelect) return;
+    const selectInstance = window.HSSelect.getInstance(selectEl);
+    if (selectInstance) {
+        selectInstance.destroy();
+    }
+    selectEl.setAttribute('data-hs-select', JSON.stringify({
+        placeholder,
+        toggleTag: '<button type="button"></button>',
+        toggleClasses: 'hs-select-disabled:pointer-events-none hs-select-disabled:opacity-50 relative py-3 px-4 pe-9 flex text-nowrap w-full cursor-pointer bg-white border border-gray-200 rounded-lg text-start text-sm focus:border-blue-500 focus:ring-blue-500 before:absolute before:inset-0 before:z-[1]',
+        dropdownClasses: 'hs-select-dropdown mt-2 z-50 w-full max-h-72 p-1 space-y-0.5 bg-white border border-gray-200 rounded-lg overflow-hidden overflow-y-auto [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-track]:bg-gray-100 [&::-webkit-scrollbar-thumb]:bg-gray-300',
+        optionClasses: 'py-2 px-4 w-full text-sm text-gray-800 cursor-pointer hover:bg-gray-100 rounded-lg focus:outline-none focus:bg-gray-100',
+        optionTemplate: '<div class="flex justify-between items-center w-full"><span data-title></span><span class="hidden hs-selected:block"><svg class="flex-shrink-0 size-3.5 text-blue-600" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span></div>',
+        hasSearch: true,
+        searchPlaceholder: 'Search...',
+        searchClasses: 'block w-full text-sm border-gray-200 rounded-lg focus:border-blue-500 focus:ring-blue-500 before:absolute before:inset-0 before:z-[1] py-2 px-3',
+        searchWrapperClasses: 'bg-white p-2 -mx-1 sticky top-0',
+    }));
+}
+
+function initGenreHsSelect(selectEl) {
+    if (selectEl && window.HSSelect) {
+        window.HSSelect.autoInit();
+    }
 }
 
 function updateGenreSubmitEnabled() {
@@ -463,13 +474,14 @@ function handleGenreSelectionModeChange() {
 
 async function loadGenres() {
     try {
-        const params = [`min_song_count=${getGenreMinSongCount()}`];
+        const params = [];
         if (selectedLibraryIds.length > 0) {
             selectedLibraryIds.forEach(id => {
                 params.push(`library_id=${encodeURIComponent(id)}`);
             });
         }
-        const url = `/api/genres?${params.join('&')}`;
+        const query = params.length > 0 ? `?${params.join('&')}` : '';
+        const url = `/api/genres${query}`;
         const response = await fetch(url);
         if (!response.ok) {
             throw new Error('Failed to fetch genres');
@@ -479,27 +491,8 @@ async function loadGenres() {
         // Get the genre select element
         const genreSelect = document.getElementById('genre-select');
 
-        // Update the placeholder text to show genre count
-        if (genreSelect && window.HSSelect) {
-            const selectInstance = window.HSSelect.getInstance(genreSelect);
-            if (selectInstance) {
-                selectInstance.destroy();
-            }
-
-            // Update the data-hs-select attribute with new placeholder
-            const newPlaceholder = `Select from ${allGenres.length} genres...`;
-            genreSelect.setAttribute('data-hs-select', JSON.stringify({
-                "placeholder": newPlaceholder,
-                "toggleTag": "<button type=\"button\"></button>",
-                "toggleClasses": "hs-select-disabled:pointer-events-none hs-select-disabled:opacity-50 relative py-3 px-4 pe-9 flex text-nowrap w-full cursor-pointer bg-white border border-gray-200 rounded-lg text-start text-sm focus:border-blue-500 focus:ring-blue-500 before:absolute before:inset-0 before:z-[1]",
-                "dropdownClasses": "hs-select-dropdown mt-2 z-50 w-full max-h-72 p-1 space-y-0.5 bg-white border border-gray-200 rounded-lg overflow-hidden overflow-y-auto [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-track]:bg-gray-100 [&::-webkit-scrollbar-thumb]:bg-gray-300",
-                "optionClasses": "py-2 px-4 w-full text-sm text-gray-800 cursor-pointer hover:bg-gray-100 rounded-lg focus:outline-none focus:bg-gray-100",
-                "optionTemplate": "<div class=\"flex justify-between items-center w-full\"><span data-title></span><span class=\"hidden hs-selected:block\"><svg class=\"flex-shrink-0 size-3.5 text-blue-600\" xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><polyline points=\"20 6 9 17 4 12\"/></svg></span></div>",
-                "hasSearch": true,
-                "searchPlaceholder": "Search...",
-                "searchClasses": "block w-full text-sm border-gray-200 rounded-lg focus:border-blue-500 focus:ring-blue-500 before:absolute before:inset-0 before:z-[1] py-2 px-3",
-                "searchWrapperClasses": "bg-white p-2 -mx-1 sticky top-0"
-            }));
+        if (genreSelect) {
+            configureGenreHsSelect(genreSelect, `Select from ${allGenres.length} genres...`);
         }
 
         // Clear any previous selection
@@ -528,10 +521,7 @@ async function loadGenres() {
                 genreSelect.dataset.changeListenerAttached = 'true';
             }
 
-            // Reinitialize the HSSelect component
-            if (window.HSSelect) {
-                window.HSSelect.autoInit();
-            }
+            initGenreHsSelect(genreSelect);
         }
     } catch (error) {
         console.error('Error loading genres:', error);
@@ -541,13 +531,15 @@ async function loadGenres() {
 
 async function loadMetaGenres() {
     try {
-        const params = [`min_song_count=${getGenreMinSongCount()}`];
+        const params = [];
         if (selectedLibraryIds.length > 0) {
             selectedLibraryIds.forEach(id => {
                 params.push(`library_id=${encodeURIComponent(id)}`);
             });
         }
-        const response = await fetch(`/api/genres/meta?${params.join('&')}`);
+        const query = params.length > 0 ? `?${params.join('&')}` : '';
+        // Use the same source as Genre Insights so CREATE and MANAGE stay consistent.
+        const response = await fetch(`/api/genres/meta/insights${query}`);
         if (!response.ok) {
             throw new Error('Failed to fetch meta genres');
         }
@@ -556,6 +548,8 @@ async function loadMetaGenres() {
 
         const metaSelect = document.getElementById('meta-genre-select');
         if (!metaSelect) return;
+
+        configureGenreHsSelect(metaSelect, `Select from ${allMetaGenres.length} meta-genres...`);
 
         selectedMetaGenre = null;
         metaSelect.value = '';
@@ -573,6 +567,8 @@ async function loadMetaGenres() {
             metaSelect.addEventListener('change', handleMetaGenreSelection);
             metaSelect.dataset.changeListenerAttached = 'true';
         }
+
+        initGenreHsSelect(metaSelect);
         updateGenreSubmitEnabled();
     } catch (error) {
         console.error('Error loading meta genres:', error);
@@ -603,7 +599,8 @@ function renderGenreInsights(insights) {
     const cards = document.getElementById('genre-insights-cards');
     const groupsEl = document.getElementById('genre-insights-groups');
     const warningEl = document.getElementById('genre-insights-warning');
-    if (!cards || !groupsEl || !warningEl) return;
+    const diagnosticsEl = document.getElementById('genre-insights-diagnostics');
+    if (!cards || !groupsEl || !warningEl || !diagnosticsEl) return;
 
     const settings = insights.settings || {};
     const values = [
@@ -635,6 +632,26 @@ function renderGenreInsights(insights) {
     } else {
         warningEl.classList.add('hidden');
         warningEl.textContent = '';
+    }
+
+    const diagnostics = insights.diagnostics || {};
+    const diagnosticsLines = [];
+    if (Object.keys(diagnostics).length > 0) {
+        diagnosticsLines.push(`LLM attempted: ${diagnostics.llm_attempted ? 'yes' : 'no'}`);
+        diagnosticsLines.push(`Provider available: ${diagnostics.provider_available ? 'yes' : 'no'}`);
+        diagnosticsLines.push(`Fallback used: ${diagnostics.fallback_used ? 'yes' : 'no'}`);
+        diagnosticsLines.push(`Fallback reason: ${diagnostics.fallback_reason || 'none'}`);
+        if (typeof diagnostics.candidate_group_count !== 'undefined') diagnosticsLines.push(`Candidate groups: ${diagnostics.candidate_group_count}`);
+        if (typeof diagnostics.validated_group_count !== 'undefined') diagnosticsLines.push(`Validated groups: ${diagnostics.validated_group_count}`);
+        if (typeof diagnostics.matched_member_count !== 'undefined') diagnosticsLines.push(`Matched members: ${diagnostics.matched_member_count}`);
+        if (typeof diagnostics.unmatched_member_count !== 'undefined') diagnosticsLines.push(`Unmatched members: ${diagnostics.unmatched_member_count}`);
+        if (typeof diagnostics.leftover_count !== 'undefined') diagnosticsLines.push(`Leftovers auto-added: ${diagnostics.leftover_count}`);
+        if (diagnostics.degraded_snapshot_rejected) diagnosticsLines.push('Degraded snapshot rejected: yes');
+        diagnosticsEl.classList.remove('hidden');
+        diagnosticsEl.textContent = diagnosticsLines.join('\n');
+    } else {
+        diagnosticsEl.classList.add('hidden');
+        diagnosticsEl.textContent = '';
     }
 
     const groups = insights.groups || [];
@@ -975,7 +992,9 @@ function handleLibraryCheckboxChange(e) {
         loadArtists();
     } else if (currentPage === 'genre-mix') {
         loadGenres();
-        loadMetaGenres();
+        if (genreSelectionMode === 'meta') {
+            loadMetaGenres();
+        }
     } else if (currentPage === 'genre-insights') {
         loadGenreInsights();
     }
@@ -2310,7 +2329,9 @@ function handlePageNavigation(page) {
         if (selectedLibraryIds.length > 0) {
             setTimeout(() => {
                 loadGenres();
-                loadMetaGenres();
+                if (genreSelectionMode === 'meta') {
+                    loadMetaGenres();
+                }
             }, 100);
         }
     } else if (page === 'playlists') {

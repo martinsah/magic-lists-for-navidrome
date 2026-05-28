@@ -62,6 +62,7 @@ class AIProvider:
         temperature: float = 0.7,
         json_response: bool = False,
         include_suggestions: bool = False,
+        response_schema: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Send chat completion request to configured AI provider"""
         
@@ -74,6 +75,7 @@ class AIProvider:
                 temperature,
                 json_response=json_response,
                 include_suggestions=include_suggestions,
+                response_schema=response_schema,
             )
         
         # Build headers - only include Authorization for providers that require keys
@@ -166,6 +168,7 @@ class AIProvider:
         temperature: float = 0.7,
         json_response: bool = False,
         include_suggestions: bool = False,
+        response_schema: Optional[Dict[str, Any]] = None,
     ) -> Union[str, NoReturn]:  # type: ignore
         """Handle Google AI's specific API format with controlled generation for JSON"""
         url = f"{self.base_url}/models/{self.model}:generateContent?key={self.api_key}"
@@ -206,32 +209,35 @@ class AIProvider:
 
         if json_response:
             generation_config["responseMimeType"] = "application/json"
-            schema_properties: Dict[str, Any] = {
-                "track_ids": {
-                    "type": "ARRAY",
-                    "items": {"type": "INTEGER"},
-                },
-                "reasoning": {"type": "STRING"},
-            }
-            if include_suggestions:
-                schema_properties["suggested_tracks"] = {
-                    "type": "ARRAY",
-                    "items": {
-                        "type": "OBJECT",
-                        "properties": {
-                            "title": {"type": "STRING"},
-                            "artist": {"type": "STRING"},
-                            "album": {"type": "STRING"},
-                            "note": {"type": "STRING"},
-                        },
-                        "required": ["title", "artist"],
+            if response_schema is not None:
+                generation_config["responseSchema"] = response_schema
+            else:
+                schema_properties: Dict[str, Any] = {
+                    "track_ids": {
+                        "type": "ARRAY",
+                        "items": {"type": "INTEGER"},
                     },
+                    "reasoning": {"type": "STRING"},
                 }
-            generation_config["responseSchema"] = {
-                "type": "OBJECT",
-                "properties": schema_properties,
-                "required": ["track_ids", "reasoning"],
-            }
+                if include_suggestions:
+                    schema_properties["suggested_tracks"] = {
+                        "type": "ARRAY",
+                        "items": {
+                            "type": "OBJECT",
+                            "properties": {
+                                "title": {"type": "STRING"},
+                                "artist": {"type": "STRING"},
+                                "album": {"type": "STRING"},
+                                "note": {"type": "STRING"},
+                            },
+                            "required": ["title", "artist"],
+                        },
+                    }
+                generation_config["responseSchema"] = {
+                    "type": "OBJECT",
+                    "properties": schema_properties,
+                    "required": ["track_ids", "reasoning"],
+                }
 
         payload = {
             "contents": [{
